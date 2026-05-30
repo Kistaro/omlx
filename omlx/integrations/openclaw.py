@@ -45,6 +45,7 @@ class OpenClawIntegration(Integration):
         model: str,
         host: str = "127.0.0.1",
         tools_profile: str = "coding",
+        reasoning: bool | None = None,
     ) -> None:
         def updater(config: dict) -> None:
             config.setdefault("models", {}).setdefault("providers", {})
@@ -59,7 +60,7 @@ class OpenClawIntegration(Integration):
                         "id": model,
                         "name": model,
                         "api": "openai-completions",
-                        "reasoning": False,
+                        "reasoning": bool(reasoning) if reasoning is not None else False,
                         "input": ["text"],
                         "cost": {
                             "input": 0,
@@ -161,7 +162,10 @@ class OpenClawIntegration(Integration):
         tools_profile: str = "coding",
         **kwargs,
     ) -> None:
-        self.configure(port, api_key, model, host=host, tools_profile=tools_profile)
+        reasoning = kwargs.pop("reasoning", None)
+        self.configure(
+            port, api_key, model, host=host, tools_profile=tools_profile, reasoning=reasoning
+        )
         self.configure_exec_approvals(tools_profile)
 
         env = self._scrubbed_env()
@@ -188,7 +192,9 @@ class OpenClawIntegration(Integration):
                 env=env,
             )
             # Onboarding overwrites config, re-apply
-            self.configure(port, api_key, model, host=host, tools_profile=tools_profile)
+            self.configure(
+                port, api_key, model, host=host, tools_profile=tools_profile, reasoning=reasoning
+            )
             self.configure_exec_approvals(tools_profile)
 
         _, gw_port = self._gateway_info()

@@ -391,6 +391,11 @@ def launch_command(args, extra_args: list[str] | None = None):
     context_window = model_info.get("max_context_window")
     max_tokens = model_info.get("max_tokens")
     model_type = model_info.get("model_type")
+    # Effective thinking state resolved server-side (per-model override >
+    # template default). Tri-state True/False/None; None when the server is
+    # older than this field or the model has no thinking toggle. Integrations
+    # that care collapse None to "not a reasoning model".
+    reasoning = model_info.get("enable_thinking")
 
     # Launch
     print(f"Launching {integration.display_name} with model {model}...")
@@ -404,6 +409,7 @@ def launch_command(args, extra_args: list[str] | None = None):
         context_window=context_window,
         max_tokens=max_tokens,
         model_type=model_type,
+        reasoning=reasoning,
         extra_args=extra_args,
     )
 

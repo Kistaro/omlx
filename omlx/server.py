@@ -160,6 +160,8 @@ from .engine import BaseEngine, BatchedEngine, VLMBatchedEngine
 from .engine.embedding import EmbeddingEngine
 from .engine.reranker import RerankerEngine
 from .engine_pool import EnginePool
+from .configured_model import ConfiguredModel
+from .model_settings import ModelSettings
 from .exceptions import (
     EnginePoolError,
     InsufficientMemoryError,
@@ -1733,11 +1735,23 @@ async def list_models_status(_: bool = Depends(verify_api_key)):
 
         # Resolve effective max_tokens: model setting > global default
         max_tokens = _server_state.sampling.max_tokens
+        ms = None
         if _server_state.settings_manager:
             ms = _server_state.settings_manager.get_settings(model_id)
             if ms and ms.max_tokens is not None:
                 max_tokens = ms.max_tokens
         m["max_tokens"] = max_tokens
+
+        # Resolve effective thinking state (per-model override > template
+        # default) so clients — e.g. the integration configurators — can
+        # report a model as a reasoning model without guessing from its slug.
+        # Tri-state: True/False, or None when the model has no thinking toggle.
+        # The raw model-half defaults (thinking_default /
+        # preserve_thinking_default) stay in the payload for anything already
+        # reading them; these are the resolved values.
+        cm = ConfiguredModel(ms or ModelSettings(), _server_state.engine_pool.get_entry(model_id))
+        m["enable_thinking"] = cm.enable_thinking
+        m["preserve_thinking"] = cm.preserve_thinking
     return status
 
 
@@ -2170,12 +2184,11 @@ async def create_chat_completion(
         if ms.chat_template_kwargs:
             merged_ct_kwargs.update(ms.chat_template_kwargs)
         forced_keys = set(ms.forced_ct_kwargs or [])
-        # Dedicated enable_thinking toggle takes precedence over chat_template_kwargs
-        if ms.enable_thinking is not None:
-            merged_ct_kwargs["enable_thinking"] = ms.enable_thinking
-        # preserve_thinking: keep <think> blocks in historical turns (Qwen 3.6+)
-        if ms.preserve_thinking is not None:
-            merged_ct_kwargs["preserve_thinking"] = ms.preserve_thinking
+        # Inject the explicit per-model thinking toggles (enable_thinking /
+        # preserve_thinking). An unset toggle is omitted so the template applies
+        # its own default. Resolution lives on ConfiguredModel so this stays in
+        # lockstep with the effective state reported by /v1/models/status.
+        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
         for k, v in request.chat_template_kwargs.items():
@@ -3539,12 +3552,11 @@ async def create_anthropic_message(
         if ms.chat_template_kwargs:
             merged_ct_kwargs.update(ms.chat_template_kwargs)
         forced_keys = set(ms.forced_ct_kwargs or [])
-        # Dedicated enable_thinking toggle takes precedence over chat_template_kwargs
-        if ms.enable_thinking is not None:
-            merged_ct_kwargs["enable_thinking"] = ms.enable_thinking
-        # preserve_thinking: keep <think> blocks in historical turns (Qwen 3.6+)
-        if ms.preserve_thinking is not None:
-            merged_ct_kwargs["preserve_thinking"] = ms.preserve_thinking
+        # Inject the explicit per-model thinking toggles (enable_thinking /
+        # preserve_thinking). An unset toggle is omitted so the template applies
+        # its own default. Resolution lives on ConfiguredModel so this stays in
+        # lockstep with the effective state reported by /v1/models/status.
+        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
         for k, v in request.chat_template_kwargs.items():
@@ -3955,12 +3967,11 @@ async def create_response(
         if ms.chat_template_kwargs:
             merged_ct_kwargs.update(ms.chat_template_kwargs)
         forced_keys = set(ms.forced_ct_kwargs or [])
-        # Dedicated enable_thinking toggle takes precedence over chat_template_kwargs
-        if ms.enable_thinking is not None:
-            merged_ct_kwargs["enable_thinking"] = ms.enable_thinking
-        # preserve_thinking: keep <think> blocks in historical turns (Qwen 3.6+)
-        if ms.preserve_thinking is not None:
-            merged_ct_kwargs["preserve_thinking"] = ms.preserve_thinking
+        # Inject the explicit per-model thinking toggles (enable_thinking /
+        # preserve_thinking). An unset toggle is omitted so the template applies
+        # its own default. Resolution lives on ConfiguredModel so this stays in
+        # lockstep with the effective state reported by /v1/models/status.
+        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
 
     # Note: extract_text_content/extract_harmony_messages/extract_multimodal_content
     # are NOT called here because convert_responses_input_to_messages() already
