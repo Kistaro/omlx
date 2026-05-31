@@ -51,6 +51,14 @@ class Integration:
             env.pop(key, None)
         return env
 
+    def _guess_reasoning(self, model: str) -> bool:
+        """Guess whether a model slug refers to a reasoning model.
+
+        Used as a fallback if the server does not specify explicitly whether
+        the model is configured for reasoning.
+        """
+        return bool(re.search(r'\b(thinking|o1|o3|r1)\b', model.lower()))
+
     def select_model(
         self, models_info: list[dict], tool_name: str | None = None
     ) -> str:

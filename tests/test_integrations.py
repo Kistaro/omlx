@@ -159,8 +159,7 @@ name = "old-omlx"
         assert 'model = "llama-3.1-8b"' in content
         assert "model_reasoning_effort" not in content
 
-    def test_configure_reasoning_flag_overrides_slug(self, tmp_path):
-        # Server-resolved reasoning=True wins even when the slug looks plain.
+    def test_configure_reasoning_flag_true_overrides_slug(self, tmp_path):
         config_path = tmp_path / "config.toml"
         codex = CodexIntegration()
         with patch.object(CodexIntegration, "CONFIG_PATH", config_path):
@@ -170,8 +169,6 @@ name = "old-omlx"
         assert 'model_reasoning_effort = "high"' in content
 
     def test_configure_reasoning_flag_false_overrides_slug(self, tmp_path):
-        # Server-resolved reasoning=False wins even when the slug matches the
-        # legacy heuristic (e.g. "...-r1...").
         config_path = tmp_path / "config.toml"
         codex = CodexIntegration()
         with patch.object(CodexIntegration, "CONFIG_PATH", config_path):

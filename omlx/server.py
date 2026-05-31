@@ -231,10 +231,28 @@ class ServerState:
     oq_manager: Optional[object] = None  # OQManager
     hf_uploader: Optional[object] = None  # HFUploader
 
+    def resolve_configuration(self, model_id: str) -> ConfiguredModel:
+        """Get all configuration layers for the specified model."""
+        ms = None
+        if self.settings_manager is not None:
+            ms = self.settings_manager.get_settings(model_id)
+        return ConfiguredModel(
+            ms or ModelSettings(),
+            self.engine_pool.get_entry(model_id) or EngineEntry(),
+            self.sampling or SamplingDefaults(),
+            self.global_settings or GlobalSettings(),
+        )
 
 # Global server state instance
 _server_state: ServerState = ServerState()
 
+def model_config(model_id: str) -> ConfiguredModel:
+    """Return a ConfiguredModel for the provided model name.
+
+    If no such model is known, this returns a ConfiguredModel that refers
+    to global and sampling defaults only.
+    """
+    return _server_state.resolve_configuration(model_id)
 
 def get_server_state() -> ServerState:
     """Get the global server state."""
@@ -1039,44 +1057,6 @@ def _get_ocr_defaults(model_id: str | None) -> dict | None:
         return OCR_MODEL_GENERATION_DEFAULTS.get(cmt)
     return None
 
-
-def get_max_context_window(model_id: str | None = None) -> int | None:
-    """
-    Get effective max context window limit.
-
-    Priority (#1308):
-        1. Explicit per-model setting (admin UI / settings.json override).
-        2. Context length discovered from the model's ``config.json`` at
-           server startup (``max_position_embeddings`` etc.); without
-           this tier the server would advertise the 32 K global default
-           even for models that declare 256 K+ natively.
-        3. Global default from ``SamplingConfig`` — last-resort fallback
-           for models whose config files don't expose a context length.
-
-    Returns:
-        Max context window token count, or ``None`` if no tier resolves
-        (only possible when neither the model nor the global default
-        provides a value, which shouldn't happen in practice).
-    """
-    # Resolve alias so per-model settings are found by real model ID
-    model_id = resolve_model_id(model_id)
-
-    model_settings = None
-    if model_id and _server_state.settings_manager:
-        model_settings = _server_state.settings_manager.get_settings(model_id)
-
-    if model_settings and model_settings.max_context_window is not None:
-        return model_settings.max_context_window
-
-    pool = _server_state.engine_pool
-    if model_id and pool is not None:
-        entry = pool.get_entry(model_id)
-        if entry is not None and entry.model_context_length is not None:
-            return entry.model_context_length
-
-    return _server_state.sampling.max_context_window
-
-
 def scale_anthropic_tokens(token_count: int, model_id: str | None = None) -> int:
     """
     Scale token count for Anthropic API response if context scaling is enabled.
@@ -1102,7 +1082,7 @@ def scale_anthropic_tokens(token_count: int, model_id: str | None = None) -> int
     if not cc.context_scaling_enabled:
         return token_count
 
-    actual = get_max_context_window(model_id)
+    actual = model_config(model_id).max_context_window
     if not actual or actual >= cc.target_context_size:
         return token_count
 
@@ -1117,7 +1097,7 @@ def validate_context_window(
 
     Raises HTTPException 400 if the prompt is too long.
     """
-    max_ctx = get_max_context_window(model_id)
+    max_ctx = model_config(model_id).max_context_window
     if max_ctx and num_prompt_tokens > max_ctx:
         raise HTTPException(
             status_code=400,
@@ -1699,19 +1679,14 @@ async def list_models(_: bool = Depends(verify_api_key)) -> ModelsResponse:
 
     if _server_state.engine_pool is not None:
         status = _server_state.engine_pool.get_status()
-        settings_manager = _server_state.settings_manager
         for m in status["models"]:
             model_id = m["id"]
-            display_id = model_id
-            if settings_manager:
-                ms = settings_manager.get_settings(model_id)
-                if ms.model_alias:
-                    display_id = ms.model_alias
+            config = model_config(model_id)
             models.append(
                 ModelInfo(
-                    id=display_id,
+                    id=config.settings.model_alias or model_id,
                     owned_by="omlx",
-                    max_model_len=get_max_context_window(model_id),
+                    max_model_len=config.max_context_window,
                 )
             )
 
@@ -1731,27 +1706,12 @@ async def list_models_status(_: bool = Depends(verify_api_key)):
     status = _server_state.engine_pool.get_status()
     for m in status["models"]:
         model_id = m["id"]
-        m["max_context_window"] = get_max_context_window(model_id)
+        config = model_config(model_id)
+        m["max_context_window"] = config.max_context_window
+        m["max_tokens"] = config.max_tokens
+        m["enable_thinking"] = config.enable_thinking
+        m["preserve_thinking"] = config.presrve_thinking
 
-        # Resolve effective max_tokens: model setting > global default
-        max_tokens = _server_state.sampling.max_tokens
-        ms = None
-        if _server_state.settings_manager:
-            ms = _server_state.settings_manager.get_settings(model_id)
-            if ms and ms.max_tokens is not None:
-                max_tokens = ms.max_tokens
-        m["max_tokens"] = max_tokens
-
-        # Resolve effective thinking state (per-model override > template
-        # default) so clients — e.g. the integration configurators — can
-        # report a model as a reasoning model without guessing from its slug.
-        # Tri-state: True/False, or None when the model has no thinking toggle.
-        # The raw model-half defaults (thinking_default /
-        # preserve_thinking_default) stay in the payload for anything already
-        # reading them; these are the resolved values.
-        cm = ConfiguredModel(ms or ModelSettings(), _server_state.engine_pool.get_entry(model_id))
-        m["enable_thinking"] = cm.enable_thinking
-        m["preserve_thinking"] = cm.preserve_thinking
     return status
 
 
@@ -2171,24 +2131,21 @@ async def create_chat_completion(
 
     # Resolve alias to real model ID for settings lookups
     resolved_model = resolve_model_id(request.model) or request.model
+    config = model_config(resolved_model)
 
     # Get per-model settings
-    max_tool_result_tokens = None
+    max_tool_result_tokens = config.settings.max_tool_result_tokens
+    reasoning_parser = config.settings.reasoning_parser
+
     merged_ct_kwargs = {}
     forced_keys: set[str] = set()
-    reasoning_parser = None
-    if _server_state.settings_manager:
-        ms = _server_state.settings_manager.get_settings(resolved_model)
-        max_tool_result_tokens = ms.max_tool_result_tokens
-        reasoning_parser = ms.reasoning_parser
-        if ms.chat_template_kwargs:
-            merged_ct_kwargs.update(ms.chat_template_kwargs)
-        forced_keys = set(ms.forced_ct_kwargs or [])
-        # Inject the explicit per-model thinking toggles (enable_thinking /
-        # preserve_thinking). An unset toggle is omitted so the template applies
-        # its own default. Resolution lives on ConfiguredModel so this stays in
-        # lockstep with the effective state reported by /v1/models/status.
-        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
+    if config.settings.chat_template_kwargs:
+        merged_ct_kwargs.update(config.settings.chat_template_kwargs)
+    forced_keys = set(config.settings.forced_ct_kwargs or [])
+    # Apply thinking template overrides
+    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
         for k, v in request.chat_template_kwargs.items():
@@ -3543,20 +3500,18 @@ async def create_anthropic_message(
     resolved_model = resolve_model_id(request.model) or request.model
 
     # Get per-model settings
-    max_tool_result_tokens = None
+    max_tool_result_tokens = config.settings.max_tool_result_tokens
+    reasoning_parser = config.settings.reasoning_parser
+
     merged_ct_kwargs = {}
     forced_keys: set[str] = set()
-    if _server_state.settings_manager:
-        ms = _server_state.settings_manager.get_settings(resolved_model)
-        max_tool_result_tokens = ms.max_tool_result_tokens
-        if ms.chat_template_kwargs:
-            merged_ct_kwargs.update(ms.chat_template_kwargs)
-        forced_keys = set(ms.forced_ct_kwargs or [])
-        # Inject the explicit per-model thinking toggles (enable_thinking /
-        # preserve_thinking). An unset toggle is omitted so the template applies
-        # its own default. Resolution lives on ConfiguredModel so this stays in
-        # lockstep with the effective state reported by /v1/models/status.
-        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
+    if config.settings.chat_template_kwargs:
+        merged_ct_kwargs.update(config.settings.chat_template_kwargs)
+    forced_keys = set(config.settings.forced_ct_kwargs or [])
+    # Apply thinking template overrides
+    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
         for k, v in request.chat_template_kwargs.items():
@@ -3956,22 +3911,19 @@ async def create_response(
     openai_tools = convert_responses_tools(request.tools)
 
     # Get per-model settings
-    max_tool_result_tokens = None
+    max_tool_result_tokens = config.settings.max_tool_result_tokens
+    reasoning_parser = config.settings.reasoning_parser
+
     merged_ct_kwargs = {}
     forced_keys: set[str] = set()
-    reasoning_parser = None
-    if _server_state.settings_manager:
-        ms = _server_state.settings_manager.get_settings(resolved_model)
-        max_tool_result_tokens = ms.max_tool_result_tokens
-        reasoning_parser = ms.reasoning_parser
-        if ms.chat_template_kwargs:
-            merged_ct_kwargs.update(ms.chat_template_kwargs)
-        forced_keys = set(ms.forced_ct_kwargs or [])
-        # Inject the explicit per-model thinking toggles (enable_thinking /
-        # preserve_thinking). An unset toggle is omitted so the template applies
-        # its own default. Resolution lives on ConfiguredModel so this stays in
-        # lockstep with the effective state reported by /v1/models/status.
-        merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
+    if config.settings.chat_template_kwargs:
+        merged_ct_kwargs.update(config.settings.chat_template_kwargs)
+    forced_keys = set(config.settings.forced_ct_kwargs or [])
+    # Apply thinking template overrides
+    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+
+    # Per-request kwargs not supported in Responses API.
 
     # Note: extract_text_content/extract_harmony_messages/extract_multimodal_content
     # are NOT called here because convert_responses_input_to_messages() already

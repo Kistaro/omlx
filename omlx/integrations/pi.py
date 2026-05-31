@@ -41,22 +41,6 @@ class PiIntegration(Integration):
             f"launch pi --model {model or 'select-a-model'}"
         )
 
-    @staticmethod
-    def _is_reasoning_model(model: str | None) -> bool:
-        return bool(re.search(r"\b(thinking|o1|o3|r1)\b", (model or "").lower()))
-
-    @classmethod
-    def _resolve_reasoning(cls, reasoning: bool | None, model: str | None) -> bool:
-        """Whether to advertise this model to Pi as a reasoning model.
-
-        Prefer the effective thinking state resolved server-side (passed as
-        ``reasoning``); fall back to the model-slug heuristic only when the
-        server did not supply it (older server, or no thinking toggle).
-        """
-        if reasoning is not None:
-            return bool(reasoning)
-        return cls._is_reasoning_model(model)
-
     def configure(
         self,
         port: int,
@@ -80,7 +64,11 @@ class PiIntegration(Integration):
                 model_entry: dict = {
                     "id": model,
                     "name": model,
-                    "reasoning": self._resolve_reasoning(reasoning, model),
+                    "reasoning": (
+                        bool(reasoning)
+                        if reasoning is not None
+                        else self._guess_reasoning(model)
+                    ),
                     "input": ["text", "image"] if model_type == "vlm" else ["text"],
                     "cost": {
                         "input": 0,

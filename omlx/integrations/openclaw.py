@@ -60,7 +60,11 @@ class OpenClawIntegration(Integration):
                         "id": model,
                         "name": model,
                         "api": "openai-completions",
-                        "reasoning": bool(reasoning) if reasoning is not None else False,
+                        "reasoning": (
+                            bool(reasoning)
+                            if reasoning is not None
+                            else False  # should this fall back to a guess?
+                        ),
                         "input": ["text"],
                         "cost": {
                             "input": 0,
@@ -68,8 +72,8 @@ class OpenClawIntegration(Integration):
                             "cacheRead": 0,
                             "cacheWrite": 0,
                         },
-                        "contextWindow": 131072,
-                        "maxTokens": 8192,
+                        "contextWindow": 131072,  # BUG: pick up from launch args
+                        "maxTokens": 8192,  # BUG: pick up from launch args
                     }
                 ]
             config["models"]["providers"]["omlx"] = provider_config

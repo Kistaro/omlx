@@ -1,58 +1,50 @@
-"""A configured model: a model paired with its per-model configuration.
+"""Centralized resolution for model configurations.
 
-``ConfiguredModel`` is the small object that holds the two halves the server
-already shuffles around separately — an :class:`~omlx.engine_pool.EngineEntry`
-(the *model*: what its chat template defaults to, its declared context length,
-etc.) and a :class:`~omlx.model_settings.ModelSettings` (the *configuration*:
-the user's explicit overrides) — and owns the handful of resolutions that
-depend on *exactly* those two inputs.
+In general, model settings override model defaults, model defaults override
+sampling defaults, and sampling defaults override global defaults. Settings
+not related to sampling are expected to be absent from sampling defaults, and
+not all of these settings objects use the same name for the same concept.
 
-Deliberately **not** here: anything that also consults the global
-``SamplingDefaults`` tier (``max_tokens``, ``max_context_window``, sampling
-params). Those are a three-input resolution and live in ``get_max_context_window``
-/ ``get_resolved_sampling_params`` in ``server.py``. Keeping this object to the
-two-input resolutions is what keeps it two fields; if a method here needed a
-third input, the abstraction would be lying.
+This object is intended to be incrementally extended and incrementally adopted:
+when updating code that performs this kind of resolution, migrate it to use
+this object if practical.
 
-The reasoning/thinking resolution is the motivating case (see #?, the Pi
-integration was guessing "is this a reasoning model" from the model slug
-instead of reading the model's configured thinking state). Both the
-``/v1/models/status`` endpoint (which reports the *effective* state to
-integration clients) and the chat-completion handlers (which inject template
-kwargs) source that logic from here so they cannot drift apart.
+In addition to resolving a setting from multiple layers, this allows passing
+a model and its configuration around as a single object, which can clean up
+function interfaces.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from .model_settings import ModelSettings
+from .engine_pool import EngineEntry
+from .server import SamplingDefaults
+from .settings import GlobalSettings
 
-if TYPE_CHECKING:  # avoid importing the heavy engine_pool module at runtime
-    from .engine_pool import EngineEntry
-
+def first_present[T](*args: Optional[T]) -> Optional[T]:
+    """The first non-None value passed, or None if all are None."""
+    for x in args:
+        if x is not None:
+            return x
+    return None
 
 @dataclass(frozen=True)
 class ConfiguredModel:
-    """A :class:`ModelSettings` (configuration) bound to an :class:`EngineEntry`
-    (model).
+    """A model, its configuration, and its sources for fallback settings.
 
-    ``entry`` is optional: the chat-completion handlers only need the *override*
-    accessors (which read settings alone), so they can construct
-    ``ConfiguredModel(ms)`` without paying for an entry lookup. The *resolved*
-    accessors fall back to ``None`` when no entry is present.
+    Each layer in the ConfiguredModel must always be present. If no data
+    exists for a layer -- for example, a nonexistent model will have no settings
+    or entry -- that layer will be present but empty. 
     """
 
-    settings: ModelSettings
-    entry: Optional["EngineEntry"] = None
+    # Priority is generally settings > model_entry > sampling > global_settings.
 
-    # ------------------------------------------------------------------ #
-    # Resolved effective state — per-model override wins, else the model's
-    # own template default. Tri-state: True/False, or None when the model has
-    # no thinking toggle at all. This is what we *report* (e.g. to integration
-    # clients via /v1/models/status), not what we force into the template.
-    # ------------------------------------------------------------------ #
+    settings: ModelSettings
+    model_entry: EngineEntry
+    sampling: SamplingDefaults
+    global_settings: GlobalSettings
 
     @property
     def enable_thinking(self) -> Optional[bool]:
@@ -60,35 +52,29 @@ class ConfiguredModel:
 
         ``settings.enable_thinking`` (the explicit toggle from Model settings)
         takes precedence; otherwise the model's chat-template default
-        (``entry.thinking_default``). ``None`` means the model exposes no
+        (``model_entry.thinking_default``). ``None`` means the model exposes no
         thinking toggle.
         """
-        if self.settings.enable_thinking is not None:
-            return self.settings.enable_thinking
-        return getattr(self.entry, "thinking_default", None)
+        return first_present(
+            self.settings.enable_thinking, 
+            self.model_entry.thinking_default
+        )
 
     @property
     def preserve_thinking(self) -> Optional[bool]:
         """Effective ``preserve_thinking`` state (keep <think> blocks in
         historical turns), resolved the same way as :attr:`enable_thinking`.
         """
-        if self.settings.preserve_thinking is not None:
-            return self.settings.preserve_thinking
-        return getattr(self.entry, "preserve_thinking_default", None)
-
-    # ------------------------------------------------------------------ #
-    # Inference-time contract — inject a template kwarg only when the user set
-    # an explicit value, leaving the template free to apply its own default
-    # otherwise. Intentionally does NOT fold in the template default (that's
-    # what the resolved accessors above are for).
-    # ------------------------------------------------------------------ #
+        return first_present(
+            self.settings.preserve_thinking,
+            self.model_entry.preserve_thinking_default
+        )
 
     def thinking_template_overrides(self) -> Dict[str, Any]:
         """Chat-template kwargs to merge from the explicit per-model toggles.
-
-        Returns only the keys whose override is set (not ``None``), so an unset
-        toggle defers to the template's built-in default — preserving the
-        long-standing behaviour of the chat-completion handlers.
+        
+        Uses only ``self.settings``, allowing the model's chat template to use
+        its own defaults directly. 
         """
         overrides: Dict[str, Any] = {}
         if self.settings.enable_thinking is not None:
@@ -96,3 +82,20 @@ class ConfiguredModel:
         if self.settings.preserve_thinking is not None:
             overrides["preserve_thinking"] = self.settings.preserve_thinking
         return overrides
+
+    @property
+    def max_context_window(self) -> int | None:
+        """Effective max context window limit."""
+        return first_present(
+            self.settings.max_context_window,
+            self.model_entry.model_context_length,
+            self.sampling.max_context_window
+        )
+
+    @property
+    def max_output_tokens(self) -> int | None
+        """Effective max output tokens."""
+        return first_present(
+            self.settings.max_tokens,
+            self.sampling.max_tokens
+        )

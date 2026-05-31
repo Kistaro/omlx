@@ -69,14 +69,13 @@ class CodexIntegration(Integration):
             "model_provider": '"omlx"'
         }
         
-        # If it is a reasoning model, add reasoning effort. Prefer the effective
-        # thinking state resolved server-side (passed as ``reasoning``); fall
-        # back to the model-slug heuristic only when the server did not supply
-        # it (older server, or no thinking toggle).
-        if reasoning is not None:
-            is_reasoning = bool(reasoning)
-        else:
-            is_reasoning = bool(re.search(r'\b(thinking|o1|o3|r1)\b', (model or "").lower()))
+        
+        # If it is a reasoning model, add reasoning effort. 
+        is_reasoning = (
+            bool(reasoning)
+            if reasoning is not None
+            else self._guess_reasoning(model)
+        )
         if is_reasoning:
             top_level_overrides["model_reasoning_effort"] = '"high"'
 
