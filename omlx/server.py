@@ -236,9 +236,12 @@ class ServerState:
         ms = None
         if self.settings_manager is not None:
             ms = self.settings_manager.get_settings(model_id)
+        ee = None
+        if self.engine_pool is not None:
+            ee = engine_pool.get_entry(model_id)
         return ConfiguredModel(
             ms or ModelSettings(),
-            self.engine_pool.get_entry(model_id) or EngineEntry(),
+            ee or EngineEntry(),
             self.sampling or SamplingDefaults(),
             self.global_settings or GlobalSettings(),
         )
@@ -2131,9 +2134,9 @@ async def create_chat_completion(
 
     # Resolve alias to real model ID for settings lookups
     resolved_model = resolve_model_id(request.model) or request.model
-    config = model_config(resolved_model)
 
     # Get per-model settings
+    config = model_config(resolved_model)
     max_tool_result_tokens = config.settings.max_tool_result_tokens
     reasoning_parser = config.settings.reasoning_parser
 
@@ -3500,6 +3503,7 @@ async def create_anthropic_message(
     resolved_model = resolve_model_id(request.model) or request.model
 
     # Get per-model settings
+    config = model_config(resolved_model)
     max_tool_result_tokens = config.settings.max_tool_result_tokens
     reasoning_parser = config.settings.reasoning_parser
 
@@ -3911,6 +3915,7 @@ async def create_response(
     openai_tools = convert_responses_tools(request.tools)
 
     # Get per-model settings
+    config = model_config(resolved_model)
     max_tool_result_tokens = config.settings.max_tool_result_tokens
     reasoning_parser = config.settings.reasoning_parser
 
