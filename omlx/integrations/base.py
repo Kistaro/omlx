@@ -55,8 +55,10 @@ class Integration:
     def _guess_reasoning(self, model: str) -> bool:
         """Guess whether a model slug refers to a reasoning model.
 
-        Used as a fallback if the server does not specify explicitly whether
-        the model is configured for reasoning.
+        Used as a fallback when the server's ``enable_thinking`` field
+        is absent. Does not detect most reasoning-capable models;
+        this heuristic is chosen for backwards compatibility with
+        previous versions of oMLX.
         """
         return bool(re.search(r'\b(thinking|o1|o3|r1)\b', model.lower()))
 

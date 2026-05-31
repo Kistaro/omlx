@@ -3505,7 +3505,6 @@ async def create_anthropic_message(
     # Get per-model settings
     config = model_config(resolved_model)
     max_tool_result_tokens = config.settings.max_tool_result_tokens
-    reasoning_parser = config.settings.reasoning_parser
 
     merged_ct_kwargs = {}
     forced_keys: set[str] = set()
