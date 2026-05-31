@@ -18,10 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from .model_settings import ModelSettings
-from .engine_pool import EngineEntry
-from .server import SamplingDefaults
-from .settings import GlobalSettings
+if TYPE_CHECKING:
+    from .model_settings import ModelSettings
+    from .engine_pool import EngineEntry
+    from .server import SamplingDefaults
+    from .settings import GlobalSettings
 
 def first_present[T](*args: Optional[T]) -> Optional[T]:
     """The first non-None value passed, or None if all are None."""
@@ -93,7 +94,7 @@ class ConfiguredModel:
         )
 
     @property
-    def max_output_tokens(self) -> int | None
+    def max_output_tokens(self) -> int | None:
         """Effective max output tokens."""
         return first_present(
             self.settings.max_tokens,
