@@ -238,12 +238,12 @@ class ServerState:
             ms = self.settings_manager.get_settings(model_id)
         ee = None
         if self.engine_pool is not None:
-            ee = engine_pool.get_entry(model_id)
+            ee = self.engine_pool.get_entry(model_id)
         return ConfiguredModel(
-            ms or ModelSettings(),
-            ee or EngineEntry(),
-            self.sampling or SamplingDefaults(),
-            self.global_settings or GlobalSettings(),
+            settings=ms or ModelSettings(),
+            model_entry=ee,
+            sampling=self.sampling,
+            global_settings=self.global_settings,
         )
 
 # Global server state instance
@@ -1713,7 +1713,7 @@ async def list_models_status(_: bool = Depends(verify_api_key)):
         m["max_context_window"] = config.max_context_window
         m["max_tokens"] = config.max_tokens
         m["enable_thinking"] = config.enable_thinking
-        m["preserve_thinking"] = config.presrve_thinking
+        m["preserve_thinking"] = config.preserve_thinking
 
     return status
 
@@ -2147,7 +2147,7 @@ async def create_chat_completion(
         merged_ct_kwargs.update(config.settings.chat_template_kwargs)
     forced_keys = set(config.settings.forced_ct_kwargs or [])
     # Apply thinking template overrides
-    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+    merged_ct_kwargs.update(config.thinking_template_overrides())
 
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
@@ -3514,7 +3514,7 @@ async def create_anthropic_message(
         merged_ct_kwargs.update(config.settings.chat_template_kwargs)
     forced_keys = set(config.settings.forced_ct_kwargs or [])
     # Apply thinking template overrides
-    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+    merged_ct_kwargs.update(config.thinking_template_overrides())
 
     # Per-request kwargs override model settings (except forced keys)
     if request.chat_template_kwargs:
@@ -3926,7 +3926,7 @@ async def create_response(
         merged_ct_kwargs.update(config.settings.chat_template_kwargs)
     forced_keys = set(config.settings.forced_ct_kwargs or [])
     # Apply thinking template overrides
-    merged_ct_kwargs.update(ConfiguredModel(ms).thinking_template_overrides())
+    merged_ct_kwargs.update(config.thinking_template_overrides())
 
     # Per-request kwargs not supported in Responses API.
 

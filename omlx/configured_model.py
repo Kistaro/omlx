@@ -35,17 +35,16 @@ def first_present[T](*args: Optional[T]) -> Optional[T]:
 class ConfiguredModel:
     """A model, its configuration, and its sources for fallback settings.
 
-    Each layer in the ConfiguredModel must always be present. If no data
-    exists for a layer -- for example, a nonexistent model will have no settings
-    or entry -- that layer will be present but empty. 
+    Layers that have no backing data (e.g. an unknown model has no engine
+    entry) are ``None``; property accessors skip them gracefully.
     """
 
     # Priority is generally settings > model_entry > sampling > global_settings.
 
     settings: ModelSettings
-    model_entry: EngineEntry
-    sampling: SamplingDefaults
-    global_settings: GlobalSettings
+    model_entry: EngineEntry | None = None
+    sampling: SamplingDefaults | None = None
+    global_settings: GlobalSettings | None = None
 
     @property
     def enable_thinking(self) -> Optional[bool]:
@@ -57,8 +56,8 @@ class ConfiguredModel:
         thinking toggle.
         """
         return first_present(
-            self.settings.enable_thinking, 
-            self.model_entry.thinking_default
+            self.settings.enable_thinking,
+            getattr(self.model_entry, 'thinking_default', None)
         )
 
     @property
@@ -68,7 +67,7 @@ class ConfiguredModel:
         """
         return first_present(
             self.settings.preserve_thinking,
-            self.model_entry.preserve_thinking_default
+            getattr(self.model_entry, 'preserve_thinking_default', None)
         )
 
     def thinking_template_overrides(self) -> Dict[str, Any]:
@@ -89,14 +88,14 @@ class ConfiguredModel:
         """Effective max context window limit."""
         return first_present(
             self.settings.max_context_window,
-            self.model_entry.model_context_length,
-            self.sampling.max_context_window
+            getattr(self.model_entry, 'model_context_length', None),
+            getattr(self.sampling, 'max_context_window', None)
         )
 
     @property
-    def max_output_tokens(self) -> int | None:
+    def max_tokens(self) -> int | None:
         """Effective max output tokens."""
         return first_present(
             self.settings.max_tokens,
-            self.sampling.max_tokens
+            getattr(self.sampling, 'max_tokens', None)
         )

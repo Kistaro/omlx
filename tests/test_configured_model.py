@@ -17,10 +17,11 @@ from omlx.model_settings import ModelSettings
 
 @dataclass
 class FakeEntry:
-    """Duck-typed stand-in for EngineEntry's thinking-relevant fields."""
+    """Duck-typed stand-in for EngineEntry's relevant fields."""
 
     thinking_default: bool | None = None
     preserve_thinking_default: bool | None = None
+    model_context_length: int | None = None
 
 
 class TestEnableThinking:
@@ -87,6 +88,67 @@ class TestThinkingTemplateOverrides:
         cm = ConfiguredModel(ModelSettings(enable_thinking=None), FakeEntry(thinking_default=True))
         assert cm.thinking_template_overrides() == {}
         assert cm.enable_thinking is True  # but the *reported* state is still True
+
+
+@dataclass
+class FakeSampling:
+    """Duck-typed stand-in for SamplingDefaults' relevant fields."""
+
+    max_context_window: int = 32768
+    max_tokens: int = 32768
+
+
+class TestMaxContextWindow:
+    """Precedence: per-model setting > discovered context > sampling default."""
+
+    def test_global_default_when_nothing_set(self):
+        cm = ConfiguredModel(ModelSettings(), sampling=FakeSampling(max_context_window=32768))
+        assert cm.max_context_window == 32768
+
+    def test_discovered_context_wins_over_global(self):
+        cm = ConfiguredModel(
+            ModelSettings(),
+            FakeEntry(model_context_length=262144),
+            FakeSampling(max_context_window=32768),
+        )
+        assert cm.max_context_window == 262144
+
+    def test_per_model_setting_wins_over_discovery(self):
+        cm = ConfiguredModel(
+            ModelSettings(max_context_window=16384),
+            FakeEntry(model_context_length=262144),
+            FakeSampling(max_context_window=32768),
+        )
+        assert cm.max_context_window == 16384
+
+    def test_per_model_setting_wins_over_global(self):
+        cm = ConfiguredModel(
+            ModelSettings(max_context_window=8192),
+            sampling=FakeSampling(max_context_window=32768),
+        )
+        assert cm.max_context_window == 8192
+
+    def test_all_none_returns_none(self):
+        cm = ConfiguredModel(ModelSettings())
+        assert cm.max_context_window is None
+
+    def test_no_entry_falls_to_sampling(self):
+        cm = ConfiguredModel(ModelSettings(), sampling=FakeSampling(max_context_window=65536))
+        assert cm.max_context_window == 65536
+
+
+class TestMaxTokens:
+    def test_settings_wins_over_sampling(self):
+        cm = ConfiguredModel(ModelSettings(max_tokens=4096), sampling=FakeSampling(max_tokens=32768))
+        assert cm.max_tokens == 4096
+
+    def test_falls_to_sampling(self):
+        cm = ConfiguredModel(ModelSettings(), sampling=FakeSampling(max_tokens=8192))
+        assert cm.max_tokens == 8192
+
+    def test_all_none_returns_none(self):
+        cm = ConfiguredModel(ModelSettings())
+        assert cm.max_tokens is None
 
 
 if __name__ == "__main__":
