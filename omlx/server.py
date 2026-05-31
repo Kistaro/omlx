@@ -160,7 +160,7 @@ from .engine import BaseEngine, BatchedEngine, VLMBatchedEngine
 from .engine.embedding import EmbeddingEngine
 from .engine.reranker import RerankerEngine
 from .engine_pool import EnginePool
-from .configured_model import ConfiguredModel
+from .configured_model import ConfiguredModel, new_configured_model
 from .model_settings import ModelSettings
 from .exceptions import (
     EnginePoolError,
@@ -239,8 +239,8 @@ class ServerState:
         ee = None
         if self.engine_pool is not None:
             ee = self.engine_pool.get_entry(model_id)
-        return ConfiguredModel(
-            settings=ms or ModelSettings(),
+        return new_configured_model(
+            settings=ms,
             model_entry=ee,
             sampling=self.sampling,
             global_settings=self.global_settings,

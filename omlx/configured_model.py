@@ -18,11 +18,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from .engine_pool import EngineEntry
+from .model_settings import ModelSettings
+from .settings import GlobalSettings
+
 if TYPE_CHECKING:
-    from .model_settings import ModelSettings
-    from .engine_pool import EngineEntry
+    # SamplingDefaults lives in server.py, which imports this module.
     from .server import SamplingDefaults
-    from .settings import GlobalSettings
 
 def first_present[T](*args: Optional[T]) -> Optional[T]:
     """The first non-None value passed, or None if all are None."""
@@ -31,20 +33,29 @@ def first_present[T](*args: Optional[T]) -> Optional[T]:
             return x
     return None
 
+
+_EMPTY_ENGINE_ENTRY = EngineEntry(
+    model_id="", model_path="", model_type="llm",
+    engine_type="batched", estimated_size=0,
+)
+
+
 @dataclass(frozen=True)
 class ConfiguredModel:
     """A model, its configuration, and its sources for fallback settings.
 
-    Layers that have no backing data (e.g. an unknown model has no engine
-    entry) are ``None``; property accessors skip them gracefully.
+    Every layer is always present.  Layers with no real data use default-
+    constructed instances (e.g. ``ModelSettings()`` with every field
+    ``None``, an ``EngineEntry`` with empty strings and zeroes, etc.).
+    This keeps property accessors simple — no ``None`` guards needed.
     """
 
     # Priority is generally settings > model_entry > sampling > global_settings.
 
     settings: ModelSettings
-    model_entry: EngineEntry | None = None
-    sampling: SamplingDefaults | None = None
-    global_settings: GlobalSettings | None = None
+    model_entry: EngineEntry
+    sampling: SamplingDefaults
+    global_settings: GlobalSettings
 
     @property
     def enable_thinking(self) -> Optional[bool]:
@@ -57,7 +68,7 @@ class ConfiguredModel:
         """
         return first_present(
             self.settings.enable_thinking,
-            getattr(self.model_entry, 'thinking_default', None)
+            self.model_entry.thinking_default
         )
 
     @property
@@ -67,14 +78,14 @@ class ConfiguredModel:
         """
         return first_present(
             self.settings.preserve_thinking,
-            getattr(self.model_entry, 'preserve_thinking_default', None)
+            self.model_entry.preserve_thinking_default
         )
 
     def thinking_template_overrides(self) -> Dict[str, Any]:
         """Chat-template kwargs to merge from the explicit per-model toggles.
-        
+
         Uses only ``self.settings``, allowing the model's chat template to use
-        its own defaults directly. 
+        its own defaults directly.
         """
         overrides: Dict[str, Any] = {}
         if self.settings.enable_thinking is not None:
@@ -88,8 +99,8 @@ class ConfiguredModel:
         """Effective max context window limit."""
         return first_present(
             self.settings.max_context_window,
-            getattr(self.model_entry, 'model_context_length', None),
-            getattr(self.sampling, 'max_context_window', None)
+            self.model_entry.model_context_length,
+            self.sampling.max_context_window
         )
 
     @property
@@ -97,5 +108,22 @@ class ConfiguredModel:
         """Effective max output tokens."""
         return first_present(
             self.settings.max_tokens,
-            getattr(self.sampling, 'max_tokens', None)
+            self.sampling.max_tokens
         )
+
+
+def new_configured_model(
+    settings: ModelSettings | None = None,
+    model_entry: EngineEntry | None = None,
+    sampling: SamplingDefaults | None = None,
+    global_settings: GlobalSettings | None = None,
+) -> ConfiguredModel:
+    """Build a ConfiguredModel, filling absent layers with defaults."""
+    # Lazy import: SamplingDefaults lives in server.py, which imports us.
+    from .server import SamplingDefaults as _SD
+    return ConfiguredModel(
+        settings=settings or ModelSettings(),
+        model_entry=model_entry or _EMPTY_ENGINE_ENTRY,
+        sampling=sampling or _SD(),
+        global_settings=global_settings or GlobalSettings(),
+    )
