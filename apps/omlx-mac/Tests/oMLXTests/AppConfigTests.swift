@@ -63,6 +63,7 @@ final class AppConfigTests: XCTestCase {
         XCTAssertEqual((json["server"] as! [String: Any])["host"] as! String, "127.0.0.1")
         XCTAssertNil((json["server"] as! [String: Any])["bind_address"])
         XCTAssertEqual((json["server"] as! [String: Any])["port"] as! Int, 9000)
+        XCTAssertEqual((json["server"] as! [String: Any])["auto_start_on_launch"] as! Bool, true)
         XCTAssertEqual((json["auth"] as! [String: Any])["api_key"] as! String, "secret")
         let model = json["model"] as! [String: Any]
         XCTAssertEqual(model["model_dirs"] as! [String], ["\(tempBase!)/models"])
@@ -96,6 +97,7 @@ final class AppConfigTests: XCTestCase {
         let cfg = AppConfig(
             bindAddress: "127.0.0.1",
             port: 8080,
+            autoStartOnLaunch: false,
             apiKey: nil,
             basePath: tempBase,
             modelDir: "/new/models",
@@ -114,6 +116,7 @@ final class AppConfigTests: XCTestCase {
         // AppConfig owns get rewritten.
         let server = after["server"] as! [String: Any]
         XCTAssertEqual(server["host"] as! String, "127.0.0.1")
+        XCTAssertEqual(server["auto_start_on_launch"] as! Bool, false)
         XCTAssertNil(server["bind_address"])
 
         let model = after["model"] as! [String: Any]
@@ -149,6 +152,35 @@ final class AppConfigTests: XCTestCase {
         XCTAssertNil(server["bind_address"])
     }
 
+    func testConnectableHostNormalizesLocalAndWildcardHosts() {
+        XCTAssertEqual(AppConfig.connectableHost(for: ""), "127.0.0.1")
+        XCTAssertEqual(AppConfig.connectableHost(for: "0.0.0.0"), "127.0.0.1")
+        XCTAssertEqual(AppConfig.connectableHost(for: "::"), "127.0.0.1")
+        XCTAssertEqual(AppConfig.connectableHost(for: "localhost"), "127.0.0.1")
+        XCTAssertEqual(AppConfig.connectableHost(for: "127.0.0.1"), "127.0.0.1")
+    }
+
+    func testConnectableHostUsesFirstConfiguredBindHost() {
+        XCTAssertEqual(
+            AppConfig.connectableHost(for: "0.0.0.0,127.0.0.1"),
+            "127.0.0.1"
+        )
+        XCTAssertEqual(
+            AppConfig.connectableHost(for: "192.168.1.10,127.0.0.1"),
+            "192.168.1.10"
+        )
+    }
+
+    func testConnectableHostPreservesIPv6Loopback() {
+        XCTAssertEqual(AppConfig.connectableHost(for: "::1"), "::1")
+        XCTAssertEqual(AppConfig.connectableHost(for: "[::1]"), "::1")
+    }
+
+    func testHTTPURLBuildsIPv6URL() throws {
+        let url = try XCTUnwrap(AppConfig.httpURL(host: "::1", port: 9000, path: "/health"))
+        XCTAssertEqual(url.absoluteString, "http://[::1]:9000/health")
+    }
+
     func testLoadAcceptsBindAddressFallback() throws {
         let url = AppConfig.settingsURL(basePath: tempBase)
         let original: [String: Any] = [
@@ -162,6 +194,24 @@ final class AppConfigTests: XCTestCase {
 
         XCTAssertEqual(slice.bindAddress, "0.0.0.0")
         XCTAssertEqual(slice.port, 9000)
+    }
+
+    func testLoadReadsAutoStartOnLaunch() throws {
+        let url = AppConfig.settingsURL(basePath: tempBase)
+        let original: [String: Any] = [
+            "server": [
+                "host": "127.0.0.1",
+                "port": 9000,
+                "auto_start_on_launch": false
+            ],
+            "model": ["model_dir": "\(tempBase!)/models"]
+        ]
+        try JSONSerialization.data(withJSONObject: original, options: [.prettyPrinted])
+            .write(to: url)
+
+        let slice = try AppConfig.readSettingsForTests(basePath: tempBase)
+
+        XCTAssertEqual(slice.autoStartOnLaunch, false)
     }
 
     func testLoadReadsModelDirsAndPrimaryModelDir() throws {

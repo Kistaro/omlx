@@ -145,26 +145,94 @@ enum ReleasesChecker {
     }
 
     static func compareVersions(_ a: String, _ b: String) -> ComparisonResult {
-        let lhs = parseVersionComponents(a)
-        let rhs = parseVersionComponents(b)
-        let count = max(lhs.count, rhs.count)
+        let lhs = parseVersion(a)
+        let rhs = parseVersion(b)
+        let count = max(lhs.release.count, rhs.release.count)
         for i in 0..<count {
-            let lv = i < lhs.count ? lhs[i] : 0
-            let rv = i < rhs.count ? rhs[i] : 0
+            let lv = i < lhs.release.count ? lhs.release[i] : 0
+            let rv = i < rhs.release.count ? rhs.release[i] : 0
             if lv < rv { return .orderedAscending }
             if lv > rv { return .orderedDescending }
         }
+        if lhs.phaseRank < rhs.phaseRank { return .orderedAscending }
+        if lhs.phaseRank > rhs.phaseRank { return .orderedDescending }
+        if lhs.phaseNumber < rhs.phaseNumber { return .orderedAscending }
+        if lhs.phaseNumber > rhs.phaseNumber { return .orderedDescending }
         return .orderedSame
     }
 
-    /// Extracts the leading numeric components of a PEP 440 version. Drops
-    /// `rc`, `dev`, `post`, build metadata. Good enough for ordering oMLX's
-    /// own tags; the prerelease distinction is already handled upstream
-    /// through GitHub's `prerelease` flag.
+    private struct ParsedVersion {
+        let release: [Int]
+        let phaseRank: Int
+        let phaseNumber: Int
+    }
+
+    private static func parseVersion(_ version: String) -> ParsedVersion {
+        let normalized = String(version.trimmingPrefix("v").trimmingPrefix("V")).lowercased()
+        let phase = parsePhase(normalized)
+        return ParsedVersion(
+            release: parseVersionComponents(normalized),
+            phaseRank: phase.rank,
+            phaseNumber: phase.number
+        )
+    }
+
+    /// Extracts the leading numeric components of a PEP 440-ish version.
     private static func parseVersionComponents(_ version: String) -> [Int] {
         let trimmed = version.split(whereSeparator: { !$0.isNumber && $0 != "." })
             .first.map(String.init) ?? version
         return trimmed.split(separator: ".").compactMap { Int($0) }
+    }
+
+    /// PEP 440-style prerelease ordering for oMLX tags:
+    /// dev < alpha < beta < rc < final.
+    private static func parsePhase(_ version: String) -> (rank: Int, number: Int) {
+        if let n = numberAfterFullMarker("dev", in: version) {
+            return (0, n)
+        }
+        if let n = numberAfterFullMarker("alpha", in: version)
+            ?? numberAfterShortMarker("a", in: version) {
+            return (1, n)
+        }
+        if let n = numberAfterFullMarker("beta", in: version)
+            ?? numberAfterShortMarker("b", in: version) {
+            return (2, n)
+        }
+        if let n = numberAfterFullMarker("rc", in: version) {
+            return (3, n)
+        }
+        return (4, 0)
+    }
+
+    private static func numberAfterFullMarker(_ marker: String, in version: String) -> Int? {
+        guard let range = version.range(of: marker) else { return nil }
+        return parseTrailingPhaseNumber(String(version[range.upperBound...]))
+    }
+
+    private static func numberAfterShortMarker(_ marker: Character, in version: String) -> Int? {
+        var idx = version.startIndex
+        while idx < version.endIndex {
+            guard version[idx] == marker else {
+                idx = version.index(after: idx)
+                continue
+            }
+            let prev = idx == version.startIndex ? nil : version[version.index(before: idx)]
+            let next = version.index(after: idx)
+            let nextChar = next < version.endIndex ? version[next] : nil
+            let prevOK = prev == nil || prev!.isNumber || prev == "." || prev == "-"
+            let nextOK = nextChar == nil || nextChar!.isNumber || nextChar == "." || nextChar == "-"
+            if prevOK && nextOK {
+                return parseTrailingPhaseNumber(String(version[next...]))
+            }
+            idx = version.index(after: idx)
+        }
+        return nil
+    }
+
+    private static func parseTrailingPhaseNumber(_ suffix: String) -> Int {
+        let trimmed = suffix.drop(while: { $0 == "." || $0 == "-" })
+        let digits = trimmed.prefix(while: { $0.isNumber })
+        return Int(digits) ?? 0
     }
 
     /// GitHub's `prerelease` flag is release metadata and can be set
@@ -191,18 +259,66 @@ enum ReleasesChecker {
     }
 
     /// Pick the DMG asset whose filename embeds the current macOS major
-    /// version (e.g. `-macos15-` / `-macos26-` / `-macos15_`). Falls back
-    /// to the single DMG when there's only one.
+    /// version (e.g. `-macos15-` / `-macos26-` / `-macos15_`). Version
+    /// ranges such as `-macos26-27.` are accepted after exact matches.
+    /// Falls back to the single DMG when there's only one.
     static func findMatchingDMG(assets: [GitHubRelease.Asset]) -> GitHubRelease.Asset? {
+        findMatchingDMG(assets: assets, macOSMajor: currentMacOSMajor())
+    }
+
+    static func findMatchingDMG(
+        assets: [GitHubRelease.Asset],
+        macOSMajor: Int
+    ) -> GitHubRelease.Asset? {
         let dmgs = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
         guard !dmgs.isEmpty else { return nil }
 
-        let osMajor = currentMacOSMajor()
-        let tag = "macos\(osMajor)"
-        if let exact = dmgs.first(where: { $0.name.contains("-\(tag)-") || $0.name.contains("-\(tag)_") }) {
+        let candidates = dmgs.map {
+            (asset: $0, ranges: macOSMajorRanges(in: $0.name))
+        }
+        if let exact = candidates.first(where: { candidate in
+            candidate.ranges.contains { range in
+                range.lowerBound == macOSMajor && range.upperBound == macOSMajor
+            }
+        })?.asset {
             return exact
         }
+        if let ranged = candidates.first(where: { candidate in
+            candidate.ranges.contains { $0.contains(macOSMajor) }
+        })?.asset {
+            return ranged
+        }
         return dmgs.count == 1 ? dmgs[0] : nil
+    }
+
+    private static func macOSMajorRanges(in assetName: String) -> [ClosedRange<Int>] {
+        let normalized = assetName.lowercased()
+        let pattern = #"(?:^|[-_])macos(\d+)(?:-(\d+))?(?=$|[-_.])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+        let fullRange = NSRange(
+            normalized.startIndex..<normalized.endIndex,
+            in: normalized
+        )
+        return regex.matches(in: normalized, range: fullRange).compactMap { match in
+            guard let lowerRange = Range(match.range(at: 1), in: normalized),
+                  let lower = Int(normalized[lowerRange])
+            else {
+                return nil
+            }
+
+            var upper = lower
+            let upperNSRange = match.range(at: 2)
+            if upperNSRange.location != NSNotFound,
+               let upperRange = Range(upperNSRange, in: normalized),
+               let parsedUpper = Int(normalized[upperRange]) {
+                upper = parsedUpper
+            }
+
+            guard upper >= lower else { return nil }
+            return lower...upper
+        }
     }
 
     /// Reads the host macOS major version (e.g. "15", "26"). Uses

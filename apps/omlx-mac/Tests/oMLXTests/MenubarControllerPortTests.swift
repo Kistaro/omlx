@@ -39,6 +39,11 @@ final class MenubarControllerPortTests: XCTestCase {
         )
     }
 
+    func testSpawnEnvironmentAdvertisesMenubarSupervisor() {
+        let env = makeRuntime().makeEnvironment()
+        XCTAssertEqual(env["OMLX_SUPERVISED"], "menubar")
+    }
+
     // MARK: - displayPort
 
     func testDisplayPortFallsBackToConfigWhenNoServer() {
@@ -101,8 +106,21 @@ final class MenubarControllerPortTests: XCTestCase {
         try server.reconfigure(bindAddress: "localhost")
         XCTAssertEqual(
             MenubarController.displayHost(server: server, fallback: "127.0.0.1"),
-            "localhost",
-            "Listen Address changes propagate to the server via saveHost → applyServerEndpoint → server.reconfigure(bindAddress:); the menubar must reflect that."
+            "127.0.0.1",
+            "Listen Address changes propagate through ServerProcess.host, which returns the connectable loopback host."
+        )
+    }
+
+    func testDisplayHostHandlesCommaSeparatedBindAddress() throws {
+        let server = ServerProcess(
+            runtime: makeRuntime(),
+            bindAddress: "0.0.0.0,127.0.0.1",
+            port: 8080
+        )
+        XCTAssertEqual(
+            MenubarController.displayHost(server: server, fallback: "127.0.0.1"),
+            "127.0.0.1",
+            "The menubar should use the first configured bind host and normalize wildcards before building URLs."
         )
     }
 
@@ -125,6 +143,13 @@ final class MenubarControllerPortTests: XCTestCase {
         let items = comps.queryItems ?? []
         XCTAssertEqual(items.first { $0.name == "redirect" }?.value, "/admin/dashboard")
         XCTAssertEqual(items.first { $0.name == "key" }?.value, "secret")
+    }
+
+    func testWebAdminURLBuildsIPv6Host() throws {
+        let url = try XCTUnwrap(
+            MenubarController.webAdminURL(host: "[::1]", port: 8000, apiKey: nil)
+        )
+        XCTAssertTrue(url.absoluteString.hasPrefix("http://[::1]:8000/admin/auto-login"))
     }
 
     func testWebAdminURLPercentEncodesKey() throws {
@@ -152,5 +177,66 @@ final class MenubarControllerPortTests: XCTestCase {
             XCTAssertEqual(comps.queryItems?.first { $0.name == "redirect" }?.value,
                            "/admin/dashboard")
         }
+    }
+
+    // MARK: - menuAvailability
+
+    func testMenuAvailabilityKeepsSettingsEnabledWhenServerIsOffline() {
+        for state in [ServerProcess.State.stopped, .failed(message: "Port 8000 in use")] {
+            let availability = MenubarController.menuAvailability(for: state)
+            XCTAssertTrue(availability.settings)
+            XCTAssertFalse(availability.webDashboard)
+            XCTAssertFalse(availability.chat)
+        }
+    }
+
+    func testMenuAvailabilityEnablesBrowserItemsOnlyWhenRunning() {
+        let availability = MenubarController.menuAvailability(for: .running(pid: 123))
+        XCTAssertTrue(availability.settings)
+        XCTAssertTrue(availability.webDashboard)
+        XCTAssertTrue(availability.chat)
+    }
+
+    func testMenuAvailabilityKeepsBrowserItemsDisabledDuringTransitions() {
+        let states: [ServerProcess.State] = [
+            .starting,
+            .stopping,
+            .unresponsive(pid: 123),
+        ]
+
+        for state in states {
+            let availability = MenubarController.menuAvailability(for: state)
+            XCTAssertTrue(availability.settings)
+            XCTAssertFalse(availability.webDashboard)
+            XCTAssertFalse(availability.chat)
+        }
+    }
+
+    // MARK: - failure alerts
+
+    func testGenericFailureAlertSkipsPortConflictMessages() {
+        XCTAssertFalse(
+            MenubarController.shouldShowGenericFailureAlert(message: "Port 8000 in use")
+        )
+        XCTAssertTrue(
+            MenubarController.shouldShowGenericFailureAlert(
+                message: "Server exited with code 1 during startup"
+            )
+        )
+    }
+
+    func testAccessFailureHintDetectsPermissionErrors() {
+        XCTAssertNotNil(
+            MenubarController.accessFailureHint(
+                message: "Server exited with code 1 during startup",
+                logTail: "PermissionError: [Errno 1] Operation not permitted"
+            )
+        )
+        XCTAssertNil(
+            MenubarController.accessFailureHint(
+                message: "Server exited with code 1 during startup",
+                logTail: "ValueError: no models found"
+            )
+        )
     }
 }

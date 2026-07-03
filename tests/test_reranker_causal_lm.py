@@ -17,6 +17,47 @@ except ImportError:
 from omlx.models.reranker import MLXRerankerModel, RerankOutput
 
 
+class TestXLMRobertaReranker:
+    """Tests for native XLM-RoBERTa sequence-classification rerankers."""
+
+    @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
+    def test_load_xlm_roberta_switches_to_eval_mode(self, tmp_path):
+        """Native reranker load must disable dropout for deterministic scores."""
+        from mlx.utils import tree_flatten
+        from omlx.models.xlm_roberta import Model, ModelArgs
+
+        config = {
+            "model_type": "xlm-roberta",
+            "architectures": ["XLMRobertaForSequenceClassification"],
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "vocab_size": 16,
+            "num_attention_heads": 1,
+            "intermediate_size": 8,
+            "max_position_embeddings": 8,
+            "attention_probs_dropout_prob": 0.5,
+            "hidden_dropout_prob": 0.5,
+            "classifier_dropout": 0.5,
+            "pad_token_id": 1,
+            "num_labels": 1,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        source_model = Model(ModelArgs(**config))
+        mx.save_safetensors(
+            str(tmp_path / "model.safetensors"),
+            {name: value for name, value in tree_flatten(source_model.parameters())},
+        )
+
+        loader = MLXRerankerModel(str(tmp_path))
+        with patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            return_value=MagicMock(),
+        ):
+            loaded_model, _ = loader._load_xlm_roberta()
+
+        assert loaded_model.training is False
+
+
 class TestCausalLMReranker:
     """Tests for CausalLM reranker (e.g., Qwen3-Reranker) functionality."""
 
@@ -542,3 +583,57 @@ class TestRerankerCompileFallback:
 
         assert result is False
         assert model._compiled_seq_logits is None
+
+
+class TestRerankerClose:
+    """Tests for reranker unload resource release."""
+
+    def test_close_releases_compiled_model_and_processor_resources(self):
+        """close() should drop wrapper references before clearing MLX caches."""
+        model = MLXRerankerModel("test-model")
+        model.model = MagicMock()
+        model.processor = MagicMock()
+        model._loaded = True
+        model._num_labels = 1
+        model._is_causal_lm = True
+        model._is_jina_reranker = True
+        model._is_vl_reranker = True
+        model._token_true_id = 1
+        model._token_false_id = 2
+        model._doc_embed_token_id = 3
+        model._query_embed_token_id = 4
+        model._jina_projector = MagicMock()
+        model._prefix_tokens = [5]
+        model._suffix_tokens = [6]
+        model._is_compiled = True
+        model._compiled_seq_logits = MagicMock()
+
+        with (
+            patch("omlx.models.reranker.gc.collect") as collect,
+            patch("omlx.models.reranker.mx") as mock_mx,
+            patch(
+                "omlx.models.reranker.clear_thread_compile_cache"
+            ) as clear_compile_cache,
+        ):
+            model.close()
+
+        assert model.model is None
+        assert model.processor is None
+        assert model._compiled_seq_logits is None
+        assert model._loaded is False
+        assert model._num_labels is None
+        assert model._is_causal_lm is False
+        assert model._is_jina_reranker is False
+        assert model._is_vl_reranker is False
+        assert model._token_true_id is None
+        assert model._token_false_id is None
+        assert model._doc_embed_token_id is None
+        assert model._query_embed_token_id is None
+        assert model._jina_projector is None
+        assert model._prefix_tokens is None
+        assert model._suffix_tokens is None
+        assert model._is_compiled is False
+        mock_mx.synchronize.assert_called_once()
+        mock_mx.clear_cache.assert_called_once()
+        clear_compile_cache.assert_called_once()
+        assert collect.call_count == 2

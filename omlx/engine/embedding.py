@@ -101,19 +101,18 @@ class EmbeddingEngine(BaseNonStreamingEngine):
             return
 
         logger.info(f"Stopping embedding engine: {self._model_name}")
+        model = self._model
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(get_mlx_executor(), model.close)
         self._model = None
 
         gc.collect()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            get_mlx_executor(), lambda: (mx.synchronize(), mx.clear_cache())
-        )
         logger.info(f"Embedding engine stopped: {self._model_name}")
 
     async def embed(
         self,
         texts: Union[List[str], List[Dict[str, str]]],
-        max_length: int = 512,
+        max_length: int | None = None,
         padding: bool = True,
         truncation: bool = True,
     ) -> EmbeddingOutput:
@@ -122,7 +121,8 @@ class EmbeddingEngine(BaseNonStreamingEngine):
 
         Args:
             texts: List of input texts
-            max_length: Maximum token length for each text
+            max_length: Maximum token length for each text. If omitted, the
+                model resolves its configured limit.
             padding: Whether to pad shorter sequences
             truncation: Whether to truncate longer sequences
 

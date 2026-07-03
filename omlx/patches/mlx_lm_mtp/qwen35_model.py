@@ -3,9 +3,8 @@
 
 Adds an MTP head to ``mlx_lm.models.qwen3_5.TextModel`` (the language-model
 half) and a pass-through on ``mlx_lm.models.qwen3_5.Model`` (the VLM-outer
-wrapper). The mechanism mirrors the patch idiom in
-``omlx/patches/gated_delta_advance.py``: replace class methods on a one-shot,
-idempotent basis tracked by a module flag.
+wrapper). The mechanism replaces class methods on a one-shot, idempotent
+basis tracked by a module flag.
 
 Important: the class names below match what mlx-lm 0.31.x actually exports.
 Earlier drafts of this patch used ``Qwen3_5GatedDeltaNet`` / ``Qwen3_5DecoderLayer``
@@ -44,8 +43,7 @@ What this patch installs (all on classes from ``mlx_lm.models.qwen3_5``):
   find them.
 
 The patch is intentionally limited to ``mlx_lm.models.qwen3_5``; mlx-vlm's
-``mlx_vlm.models.qwen3_5.language`` is a separate copy and is not touched
-(oMLX's existing ``gated_delta_advance.py`` already covers that side).
+``mlx_vlm.models.qwen3_5.language`` is a separate copy and is not touched.
 """
 
 from __future__ import annotations
@@ -472,7 +470,9 @@ def _patch_text_model(q35: Any) -> None:
         # out because the inner ``language_model`` has no ``mtp``.
         from . import is_mtp_active
 
-        if n_mtp > 0 and is_mtp_active():
+        mtp_decode_enabled = bool(n_mtp > 0 and is_mtp_active())
+        self._omlx_mtp_decode_enabled = mtp_decode_enabled
+        if mtp_decode_enabled:
             self.mtp = q35.MTPModule(args)
 
     def __call__(
@@ -754,9 +754,23 @@ def _patch_qwen3_5_moe() -> None:
                 key = "language_model." + key
             new_weights[key] = value
 
-        # Backbone MoE layers always use fused gate_up_proj (Qwen3.5/3.6).
+        num_experts = int(
+            getattr(self.language_model.args, "num_experts", 0) or 0
+        )
+
+        # Backbone MoE layers: fused gate_up_proj (Qwen3.6) or per-expert
+        # tensors (Ornith / raw Qwen3.5 MoE). Try fused first; fall back to
+        # per-expert stacking when fused keys are absent.
         for l in range(self.language_model.args.num_hidden_layers):
-            _unfuse_experts(new_weights, f"language_model.model.layers.{l}.mlp")
+            prefix = f"language_model.model.layers.{l}.mlp"
+            if f"{prefix}.switch_mlp.gate_proj.weight" in new_weights:
+                continue  # already in SwitchLinear form
+            _unfuse_experts(new_weights, prefix)
+            if (
+                f"{prefix}.switch_mlp.gate_proj.weight" not in new_weights
+                and num_experts > 0
+            ):
+                _stack_per_expert(new_weights, prefix, num_experts)
 
         # MTP layers: fused (Qwen3.6), per-expert (Qwen3.5), or dense (MTPLX).
         mtp_num = int(
@@ -773,7 +787,6 @@ def _patch_qwen3_5_moe() -> None:
                     mtp_num,
                 )
             else:
-                num_experts = self.language_model.args.num_experts
                 mtp_is_fused = (
                     "language_model.mtp.layers.0.mlp.experts.gate_up_proj"
                     in new_weights

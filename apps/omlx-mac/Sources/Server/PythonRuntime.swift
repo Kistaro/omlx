@@ -20,6 +20,9 @@
 //   PYTHONDONTWRITEBYTECODE = 1
 //     so the read-only app bundle doesn't try to scribble .pyc files into
 //     itself at first import.
+//   OMLX_SUPERVISED = menubar
+//     so the admin restart endpoint knows the parent app can respawn the
+//     server after its delayed self-SIGTERM.
 
 import Foundation
 
@@ -94,12 +97,17 @@ struct PythonRuntime {
         throw ResolutionError.notFound(triedPaths: tried)
     }
 
-    /// Build the spawn environment: parent env + Homebrew PATH + PYTHONPATH +
-    /// PYTHONHOME. `PYTHONDONTWRITEBYTECODE=1` is set in bundled mode so the
-    /// read-only app bundle doesn't try to scribble `__pycache__/` into
-    /// itself.
+    /// Build the spawn environment: parent env + supervisor marker +
+    /// Homebrew PATH + PYTHONPATH + PYTHONHOME. `PYTHONDONTWRITEBYTECODE=1`
+    /// is set in bundled mode so the read-only app bundle doesn't try to
+    /// scribble `__pycache__/` into itself.
     func makeEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        env["OMLX_SUPERVISED"] = "menubar"
+        // macOS malloc otherwise keeps large empty arenas resident after
+        // repeated model load/unload cycles. This must be set before Python
+        // starts; setting it inside omlx.cli is too late for malloc init.
+        env["MallocSpaceEfficient"] = env["MallocSpaceEfficient"] ?? "1"
 
         var path = env["PATH"] ?? ""
         for prefix in homebrewPaths.reversed() where !path.contains(prefix) {

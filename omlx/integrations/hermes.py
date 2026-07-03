@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from omlx.integrations.base import Integration, IntegrationContext
-from omlx.utils.install import get_cli_prefix
+from omlx.utils.install import get_cli_command_prefix
 
 HERMES_MIN_CONTEXT_LENGTH = 64_000
 
@@ -35,7 +35,7 @@ class HermesIntegration(Integration):
 
     def get_command(self, ctx: IntegrationContext) -> str:
         return (
-            f"{get_cli_prefix()} "
+            f"{get_cli_command_prefix()} "
             f"launch hermes --model {ctx.model or 'select-a-model'}"
         )
 
@@ -142,8 +142,11 @@ class HermesIntegration(Integration):
         # Hermes Agent v0.12.0's classic prompt_toolkit REPL registers an
         # invalid Ctrl+Shift+C keybinding ("c-S-c") on startup. The modern TUI
         # path avoids that startup crash and is the supported interactive UX.
-        args = ["hermes", "--provider", "omlx", "--tui"]
+        # --provider is a subcommand flag on `hermes chat`, not a top-level
+        # flag, and "omlx" is not a valid CLI provider value — the provider is
+        # read from ~/.hermes/config.yaml which configure() already wrote above.
+        args = ["hermes", "chat", "--tui"]
         if ctx.model:
-            args.extend(["--model", ctx.model])
+            args.extend(["-m", ctx.model])
 
         os.execvpe("hermes", args, env)

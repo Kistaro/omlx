@@ -27,12 +27,15 @@ import Foundation
 struct AppConfig: Sendable, Equatable, Codable {
     /// The raw bind address the user configured (e.g. `0.0.0.0`, `127.0.0.1`, `localhost`).
     var bindAddress: String
-    /// The connectable host — normalises `0.0.0.0` → `127.0.0.1` because
-    /// `0.0.0.0` is a bind wildcard, not a connectable address.
+    /// The connectable host — normalises wildcard/local binds to loopback
+    /// because they are bind addresses, not always connectable URL hosts.
     var host: String {
         Self.connectableHost(for: bindAddress)
     }
     var port: Int
+    /// Whether the macOS app should start the managed server automatically
+    /// when the app launches.
+    var autoStartOnLaunch: Bool
     var apiKey: String?
     /// Always `OMLX_BASE_PATH` if set, else `~/.omlx`. Set at load() time
     /// from the current process env so the running app sees a consistent
@@ -52,6 +55,7 @@ struct AppConfig: Sendable, Equatable, Codable {
     init(
         bindAddress: String,
         port: Int,
+        autoStartOnLaunch: Bool = true,
         apiKey: String?,
         basePath: String,
         modelDir: String,
@@ -60,6 +64,7 @@ struct AppConfig: Sendable, Equatable, Codable {
     ) {
         self.bindAddress = bindAddress
         self.port = port
+        self.autoStartOnLaunch = autoStartOnLaunch
         self.apiKey = apiKey
         self.basePath = basePath
         self.modelDir = modelDir
@@ -79,6 +84,7 @@ struct AppConfig: Sendable, Equatable, Codable {
         return AppConfig(
             bindAddress: "127.0.0.1",
             port: 8000,
+            autoStartOnLaunch: true,
             apiKey: nil,
             basePath: base,
             modelDir: modelDir,
@@ -108,11 +114,53 @@ struct AppConfig: Sendable, Equatable, Codable {
     }
 
     static func connectableHost(for bindAddress: String) -> String {
-        bindAddress == "0.0.0.0" ? "127.0.0.1" : bindAddress
+        var host = primaryBindHost(for: bindAddress)
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            host = String(host.dropFirst().dropLast())
+        }
+        switch host.lowercased() {
+        case "", "0.0.0.0", "::", "localhost", "127.0.0.1":
+            return "127.0.0.1"
+        default:
+            return host
+        }
+    }
+
+    static func httpURL(host: String, port: Int, path: String = "") -> URL? {
+        let urlHost = normalizedURLHost(host)
+        let urlPath = path.isEmpty ? "" : (path.hasPrefix("/") ? path : "/" + path)
+        if urlHost.contains(":") {
+            let escapedHost = urlHost.replacingOccurrences(of: "%", with: "%25")
+            return URL(string: "http://[\(escapedHost)]:\(port)\(urlPath)")
+        }
+
+        var comps = URLComponents()
+        comps.scheme = "http"
+        comps.host = urlHost
+        comps.port = port
+        if !urlPath.isEmpty {
+            comps.path = urlPath
+        }
+        return comps.url
     }
 
     var baseURL: URL? {
-        URL(string: "http://\(host):\(port)")
+        Self.httpURL(host: host, port: port)
+    }
+
+    private static func primaryBindHost(for bindAddress: String) -> String {
+        bindAddress
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+    }
+
+    private static func normalizedURLHost(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+            return String(trimmed.dropFirst().dropLast())
+        }
+        return trimmed
     }
 
     // MARK: - Path resolution
@@ -175,9 +223,8 @@ struct AppConfig: Sendable, Equatable, Codable {
     /// `currentBasePath()` resolution on the next launch:
     ///   • process env via `setenv`/`unsetenv` (so the spawned child
     ///     server inherits the choice immediately)
-    ///   • bootstrap file (so Finder relaunches see it; launchd does not
-    ///     inherit shell rc)
-    ///   • shell rc (so terminal-launched `omlx` invocations agree)
+    ///   • bootstrap file (so Finder relaunches and the app-managed CLI shim
+    ///     see it without editing shell rc files)
     /// Pass `nil` (or an empty string) to clear every override — the
     /// "reset to ~/.omlx default" flow. Callers should compare against
     /// `defaultBasePath()` first and pass `nil` when the user chose the
@@ -190,7 +237,6 @@ struct AppConfig: Sendable, Equatable, Codable {
             unsetenv(ShellEnvWriter.variableName)
         }
         try? writeBootstrapBasePath(value)
-        ShellEnvWriter.apply(value: value)
     }
 
     static func defaultBasePath() -> String {
@@ -233,6 +279,9 @@ struct AppConfig: Sendable, Equatable, Codable {
         if let slice = try? readSettings(basePath: c.basePath) {
             if let h = slice.bindAddress { c.bindAddress = h }
             if let p = slice.port { c.port = p }
+            if let autoStart = slice.autoStartOnLaunch {
+                c.autoStartOnLaunch = autoStart
+            }
             if let k = slice.apiKey, !k.isEmpty { c.apiKey = k }
             // settings.json may not have model_dirs on a brand-new install;
             // in that case `c.modelDirs` keeps the `<basePath>/models`
@@ -281,6 +330,7 @@ struct AppConfig: Sendable, Equatable, Codable {
         server["host"] = bindAddress
         server.removeValue(forKey: "bind_address")
         server["port"] = port
+        server["auto_start_on_launch"] = autoStartOnLaunch
         json["server"] = server
 
         var auth = (json["auth"] as? [String: Any]) ?? [:]
@@ -314,6 +364,7 @@ struct AppConfig: Sendable, Equatable, Codable {
     struct ServerSettingsSlice {
         var bindAddress: String?
         var port: Int?
+        var autoStartOnLaunch: Bool?
         var apiKey: String?
         var modelDirs: [String]?
         var modelDir: String?
@@ -342,6 +393,7 @@ struct AppConfig: Sendable, Equatable, Codable {
         return ServerSettingsSlice(
             bindAddress: bindAddr,
             port: server?["port"] as? Int,
+            autoStartOnLaunch: server?["auto_start_on_launch"] as? Bool,
             apiKey: auth?["api_key"] as? String,
             modelDirs: model?["model_dirs"] as? [String],
             modelDir: model?["model_dir"] as? String,
