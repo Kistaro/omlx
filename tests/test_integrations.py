@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from omlx.integrations import get_integration, list_integrations
@@ -1813,6 +1814,7 @@ class TestZedIntegration:
             ),
             patch("omlx.integrations.zed.os.environ", base_env),
             patch("omlx.integrations.zed.os.execvpe", side_effect=fake_execvpe),
+            patch("omlx.integrations.zed.shutil.which", return_value="/usr/bin/zed"),
         ):
             zed.launch(ctx(port=8000, api_key="secret-key", model="test"))
 
@@ -1822,6 +1824,69 @@ class TestZedIntegration:
         assert "PYTHONHOME" not in captured["env"]
         assert "PYTHONPATH" not in captured["env"]
         assert "PYTHONDONTWRITEBYTECODE" not in captured["env"]
+
+    def test_launch_missing_zed(self, tmp_path, capsys):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+
+        all_models = [{"id": "test", "max_model_len": 32768}]
+        status_map = {
+            "test": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+            patch("omlx.integrations.zed.shutil.which", return_value=None),
+        ):
+            with pytest.raises(SystemExit):
+                zed.launch(ctx(port=8000, api_key="key", model="test"))
+
+        captured = capsys.readouterr()
+        assert "zed not found" in captured.out.lower() or "zed" in captured.out.lower()
+
+    def test_launch_skips_execvpe_when_zed_missing(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+        execvpe_called = False
+
+        def fake_execvpe(*args, **kwargs):
+            nonlocal execvpe_called
+            execvpe_called = True
+
+        all_models = [{"id": "test", "max_model_len": 32768}]
+        status_map = {
+            "test": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+            patch("omlx.integrations.zed.shutil.which", return_value=None),
+            patch("omlx.integrations.zed.os.execvpe", side_effect=fake_execvpe),
+        ):
+            with pytest.raises(SystemExit):
+                zed.launch(ctx(port=8000, api_key="key", model="test"))
+
+        assert execvpe_called is False
 
     def test_type(self):
         from omlx.integrations.zed import ZedIntegration
@@ -1836,11 +1901,18 @@ class TestZedIntegration:
         from omlx.integrations.zed import ZedIntegration
 
         zed = ZedIntegration()
+        # Positive cases
         assert zed._is_reasoning_model("o3-mini") is True
         assert zed._is_reasoning_model("DeepSeek-R1") is True
         assert zed._is_reasoning_model("o1-preview") is True
         assert zed._is_reasoning_model("gpt-o3") is True
+        assert zed._is_reasoning_model("some-thinking-model") is True
+        # Negative cases
         assert zed._is_reasoning_model("llama-3b") is False
         assert zed._is_reasoning_model("qwen3.5") is False
         assert zed._is_reasoning_model(None) is False
         assert zed._is_reasoning_model("") is False
+        # Negative variants should NOT match as reasoning
+        assert zed._is_reasoning_model("some-thinking-no-thinking-model") is False
+        assert zed._is_reasoning_model("some-think-nothink-model") is False
+        assert zed._is_reasoning_model("qwen3.5-no-thinking") is False

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
-import time
 from pathlib import Path
 
 import requests
@@ -37,6 +35,9 @@ class ZedIntegration(Integration):
         if not model:
             return False
         lower = model.lower()
+        # Exclude explicit non-thinking variants first
+        if "no-thinking" in lower or "nothinking" in lower:
+            return False
         # Common reasoning model patterns
         return bool(
             re.search(
@@ -191,6 +192,14 @@ class ZedIntegration(Integration):
     def launch(self, ctx: IntegrationContext) -> None:
         """Configure and launch Zed."""
         self.configure(ctx)
+
+        # Verify zed is available before attempting to exec
+        if not shutil.which("zed"):
+            print(
+                "zed not found on PATH. Install from https://zed.dev "
+                "and make sure it is available in your shell."
+            )
+            raise SystemExit(1)
 
         # Set API key as environment variable (Zed reads <PROVIDER>_API_KEY)
         env = self._scrubbed_env()
