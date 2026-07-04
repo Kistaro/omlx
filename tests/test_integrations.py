@@ -2040,9 +2040,16 @@ def _zed_models(*ids):
 
 
 class TestZedConfigPreservation:
-    """Zed writes JSONC; configuring must not destroy comments or other keys."""
+    """End-to-end: ZedIntegration.configure wired through the JSONC writer.
 
-    def test_configure_preserves_comments_and_trailing_commas(self, tmp_path):
+    The deep guarantees (comment preservation, don't-bulldoze, backups) are
+    covered mock-free in TestJsoncEditing and TestWriteJsoncConfig. This test
+    covers the Zed-specific glue: building model entries and targeting the
+    right paths in a real JSONC document. Patching CONFIG_PATH is inherent to
+    exercising the integration's wiring, not incidental mocking.
+    """
+
+    def test_configure_preserves_surroundings_and_replaces_omlx(self, tmp_path):
         from omlx.integrations.zed import ZedIntegration
 
         config_path = tmp_path / "settings.json"
@@ -2053,17 +2060,20 @@ class TestZedConfigPreservation:
             '  "theme": "Andromeda", // inline comment\n'
             '  "language_models": {\n'
             '    "lmstudio": {"api_url": "http://localhost:1234/v1"},\n'
+            '    "openai_compatible": {\n'
+            '      "oMLX": {"api_url": "http://stale:1/v1", "available_models": []}\n'
+            "    },\n"
             "  },\n"
             "}\n"
         )
 
-        all_models, status = _zed_models("test-model")
+        all_models, status = _zed_models("m1", "m2")
         with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
             ZedIntegration().configure(
                 ctx(
                     port=8000,
                     api_key="key",
-                    model="test-model",
+                    model="m1",
                     all_models=all_models,
                     all_models_status=status,
                 )
@@ -2078,68 +2088,11 @@ class TestZedConfigPreservation:
         config = _jsonc_loads(text)
         assert config["theme"] == "Andromeda"
         assert "lmstudio" in config["language_models"]
-        # oMLX added.
-        assert "oMLX" in config["language_models"]["openai_compatible"]
-        assert config["agent"]["default_model"]["model"] == "test-model"
-
-    def test_configure_does_not_overwrite_unparseable_file(self, tmp_path):
-        """The core regression: a file we cannot parse must be left untouched."""
-        from omlx.integrations.zed import ZedIntegration
-
-        config_path = tmp_path / "settings.json"
-        original = "this is not json at all ][ }{ \n totally broken"
-        config_path.write_text(original)
-
-        all_models, status = _zed_models("test-model")
-        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
-            ZedIntegration().configure(
-                ctx(
-                    port=8000,
-                    api_key="key",
-                    model="test-model",
-                    all_models=all_models,
-                    all_models_status=status,
-                )
-            )
-
-        # File is byte-for-byte unchanged; nothing was bulldozed.
-        assert config_path.read_text() == original
-        # And no stray backup/config was written next to it.
-        assert list(tmp_path.glob("settings.*.bak")) == []
-
-    def test_configure_replaces_existing_omlx_but_keeps_comments(self, tmp_path):
-        from omlx.integrations.zed import ZedIntegration
-
-        config_path = tmp_path / "settings.json"
-        config_path.write_text(
-            "// header\n"
-            "{\n"
-            '  "language_models": {\n'
-            '    "openai_compatible": {\n'
-            '      "oMLX": {"api_url": "http://old:1/v1", "available_models": []}\n'
-            "    }\n"
-            "  }\n"
-            "}\n"
-        )
-
-        all_models, status = _zed_models("m1", "m2")
-        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
-            ZedIntegration().configure(
-                ctx(
-                    port=8642,
-                    api_key="key",
-                    model="m1",
-                    all_models=all_models,
-                    all_models_status=status,
-                )
-            )
-
-        text = config_path.read_text()
-        assert "// header" in text
-        config = _jsonc_loads(text)
+        # The stale oMLX block is replaced in place with the real models.
         provider = config["language_models"]["openai_compatible"]["oMLX"]
-        assert provider["api_url"] == "http://127.0.0.1:8642/v1"
+        assert provider["api_url"] == "http://127.0.0.1:8000/v1"
         assert {m["name"] for m in provider["available_models"]} == {"m1", "m2"}
+        assert config["agent"]["default_model"]["model"] == "m1"
 
 
 def _jsonc_loads(text):
@@ -2222,3 +2175,78 @@ class TestJsoncEditing:
 
         with pytest.raises(_jsonc.JsoncError):
             _jsonc.apply_updates("][ broken", lambda c: None)
+
+
+class TestWriteJsoncConfig:
+    """The shared JSONC writer's safety contract, tested without mocks.
+
+    These drive Integration._write_jsonc_config against real temp files with
+    real updater callbacks, so the guarantees -- never destroy an unparseable
+    file, preserve comments, back up before writing -- stand on their own
+    rather than being observed through any one tool's config-building glue.
+    """
+
+    def _writer(self):
+        from omlx.integrations.base import Integration
+
+        return Integration(
+            name="t",
+            display_name="T",
+            type="config_file",
+            install_check="t",
+            install_hint="t",
+        )
+
+    def test_leaves_unparseable_file_untouched(self, tmp_path):
+        config_path = tmp_path / "settings.json"
+        original = "this is not json at all ][ }{ \n totally broken"
+        config_path.write_text(original)
+
+        called = False
+
+        def updater(cfg):
+            nonlocal called
+            called = True
+            cfg["injected"] = True
+
+        self._writer()._write_jsonc_config(config_path, updater)
+
+        # A document we could not parse must never be overwritten -- and we
+        # should not even run the updater against it.
+        assert config_path.read_text() == original
+        assert called is False
+        assert list(tmp_path.glob("settings.*.bak")) == []
+
+    def test_updates_in_place_preserving_comments_and_backing_up(self, tmp_path):
+        config_path = tmp_path / "settings.json"
+        config_path.write_text(
+            "// keep me\n"
+            "{\n"
+            '  "existing": {"a": 1}, // trailing comma below is JSON5\n'
+            "}\n"
+        )
+
+        def updater(cfg):
+            cfg.setdefault("added", {})["b"] = 2
+
+        self._writer()._write_jsonc_config(config_path, updater)
+
+        text = config_path.read_text()
+        assert "// keep me" in text
+        assert "// trailing comma below is JSON5" in text
+        assert _jsonc_loads(text) == {"existing": {"a": 1}, "added": {"b": 2}}
+        # The pre-edit file is backed up before we touch it.
+        backups = list(tmp_path.glob("settings.*.bak"))
+        assert len(backups) == 1
+        assert "// keep me" in backups[0].read_text()
+
+    def test_creates_fresh_config_when_file_absent(self, tmp_path):
+        config_path = tmp_path / "settings.json"
+
+        def updater(cfg):
+            cfg["hello"] = "world"
+
+        self._writer()._write_jsonc_config(config_path, updater)
+
+        assert _jsonc_loads(config_path.read_text()) == {"hello": "world"}
+        assert list(tmp_path.glob("settings.*.bak")) == []
