@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -28,6 +28,8 @@ class IntegrationContext:
     reasoning: bool | None = None
     tools_profile: str = "coding"
     extra_args: tuple[str, ...] = ()
+    all_models: list[dict] = field(default_factory=list)
+    all_models_status: dict[str, dict] = field(default_factory=dict)
 
     @property
     def base_url(self) -> str:
@@ -166,6 +168,59 @@ class Integration:
             json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        print(f"Config written: {config_path}")
+
+    def _write_jsonc_config(
+        self,
+        config_path: Path,
+        updater: callable,
+    ) -> None:
+        """Read, update, and write a JSONC/JSON5 config file, preserving comments.
+
+        Like :meth:`_write_json_config`, but for files that may contain comments
+        and trailing commas (e.g. Zed's ``settings.json``). Two things differ:
+
+        * Parsing uses json5, so a valid JSONC file is understood rather than
+          mistaken for corrupt JSON.
+        * On a genuine parse failure the file is left **untouched** instead of
+          being overwritten with a fresh config -- overwriting is what
+          previously destroyed users' entire settings files.
+
+        Args:
+            config_path: Path to the config file.
+            updater: Function that takes the parsed config dict and mutates it
+                in-place.
+        """
+        from omlx.integrations import _jsonc
+
+        text = ""
+        if config_path.exists():
+            text = config_path.read_text(encoding="utf-8")
+
+        if text.strip():
+            try:
+                new_text = _jsonc.apply_updates(text, updater)
+            except _jsonc.JsoncError as e:
+                print(f"Error: could not parse {config_path}: {e}")
+                print("Leaving the existing file unchanged so nothing is lost.")
+                return
+
+            # Only touch the file once we have a valid replacement in hand.
+            timestamp = int(time.time())
+            backup = config_path.with_suffix(f".{timestamp}.bak")
+            try:
+                shutil.copy2(config_path, backup)
+                print(f"Backup: {backup}")
+            except OSError as e:
+                print(f"Warning: could not create backup: {e}")
+        else:
+            # No existing content: build a fresh config.
+            existing: dict = {}
+            updater(existing)
+            new_text = json.dumps(existing, indent=2, ensure_ascii=False) + "\n"
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(new_text, encoding="utf-8")
         print(f"Config written: {config_path}")
 
 

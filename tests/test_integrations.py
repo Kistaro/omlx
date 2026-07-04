@@ -25,6 +25,8 @@ def ctx(**overrides) -> IntegrationContext:
         "port": 8000,
         "api_key": "",
         "model": "",
+        "all_models": [],
+        "all_models_status": {},
     }
     defaults.update(overrides)
     return IntegrationContext(**defaults)
@@ -1556,10 +1558,21 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         zed = ZedIntegration()
 
-        # Mock the API calls
         all_models = [
-            {"id": "qwen3.5", "max_model_len": 131072},
-            {"id": "llama-3b", "max_model_len": 32768},
+            {
+                "id": "qwen3.5",
+                "enable_thinking": True,
+                "max_context_window": 131072,
+                "max_tokens": 8192,
+                "model_type": "llm",
+            },
+            {
+                "id": "llama-3b",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            },
         ]
         status_map = {
             "qwen3.5": {
@@ -1576,13 +1589,16 @@ class TestZedIntegration:
             },
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="test-key", model="qwen3.5"))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="test-key",
+                    model="qwen3.5",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         assert config_path.exists()
         config = json.loads(config_path.read_text())
@@ -1620,7 +1636,15 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         zed = ZedIntegration()
 
-        all_models = [{"id": "bakllava-1", "max_model_len": 4096}]
+        all_models = [
+            {
+                "id": "bakllava-1",
+                "enable_thinking": False,
+                "max_context_window": 4096,
+                "max_tokens": 512,
+                "model_type": "vlm",
+            }
+        ]
         status_map = {
             "bakllava-1": {
                 "enable_thinking": False,
@@ -1630,13 +1654,16 @@ class TestZedIntegration:
             }
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="key", model="bakllava-1"))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="bakllava-1",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         config = json.loads(config_path.read_text())
         model = config["language_models"]["openai_compatible"]["oMLX"][
@@ -1651,15 +1678,21 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         existing = {
             "show_edit_predictions": False,
-            "language_models": {
-                "lmstudio": {"api_url": "http://localhost:1234/v1"}
-            },
+            "language_models": {"lmstudio": {"api_url": "http://localhost:1234/v1"}},
             "theme": {"mode": "system"},
         }
         config_path.write_text(json.dumps(existing))
 
         zed = ZedIntegration()
-        all_models = [{"id": "test-model", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "test-model",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test-model": {
                 "enable_thinking": False,
@@ -1669,13 +1702,16 @@ class TestZedIntegration:
             }
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="key", model="test-model"))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="test-model",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         config = json.loads(config_path.read_text())
         # Existing preserved
@@ -1693,7 +1729,15 @@ class TestZedIntegration:
         config_path.write_text('{"existing": true}')
 
         zed = ZedIntegration()
-        all_models = [{"id": "test", "max_model_len": 1000}]
+        all_models = [
+            {
+                "id": "test",
+                "enable_thinking": False,
+                "max_context_window": 1000,
+                "max_tokens": 100,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test": {
                 "enable_thinking": False,
@@ -1703,13 +1747,16 @@ class TestZedIntegration:
             }
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="", model="test"))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="",
+                    model="test",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         backups = list(tmp_path.glob("settings.*.bak"))
         assert len(backups) == 1
@@ -1721,7 +1768,15 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         zed = ZedIntegration()
 
-        all_models = [{"id": "llama-3b", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "llama-3b",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "llama-3b": {
                 "enable_thinking": False,
@@ -1731,13 +1786,16 @@ class TestZedIntegration:
             }
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="key", model="llama-3b"))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="llama-3b",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         config = json.loads(config_path.read_text())
         model = config["language_models"]["openai_compatible"]["oMLX"][
@@ -1752,7 +1810,15 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         zed = ZedIntegration()
 
-        all_models = [{"id": "test", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "test",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test": {
                 "enable_thinking": False,
@@ -1762,21 +1828,22 @@ class TestZedIntegration:
             }
         }
 
-        with (
-            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
-        ):
-            zed.configure(ctx(port=8000, api_key="key", model=""))
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            zed.configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         config = json.loads(config_path.read_text())
         # Provider config should still be written
         assert "oMLX" in config["language_models"]["openai_compatible"]
         # But no default_model section
-        assert "agent" not in config or "default_model" not in config.get(
-            "agent", {}
-        )
+        assert "agent" not in config or "default_model" not in config.get("agent", {})
 
     def test_launch_sets_api_key_env(self, tmp_path):
         from omlx.integrations.zed import ZedIntegration
@@ -1797,7 +1864,15 @@ class TestZedIntegration:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
 
-        all_models = [{"id": "test", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "test",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test": {
                 "enable_thinking": False,
@@ -1809,14 +1884,19 @@ class TestZedIntegration:
 
         with (
             patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
             patch("omlx.integrations.zed.os.environ", base_env),
             patch("omlx.integrations.zed.os.execvpe", side_effect=fake_execvpe),
             patch("omlx.integrations.zed.shutil.which", return_value="/usr/bin/zed"),
         ):
-            zed.launch(ctx(port=8000, api_key="secret-key", model="test"))
+            zed.launch(
+                ctx(
+                    port=8000,
+                    api_key="secret-key",
+                    model="test",
+                    all_models=all_models,
+                    all_models_status=status_map,
+                )
+            )
 
         assert captured["binary"] == "zed"
         assert captured["argv"] == ["zed"]
@@ -1831,7 +1911,15 @@ class TestZedIntegration:
         config_path = tmp_path / "settings.json"
         zed = ZedIntegration()
 
-        all_models = [{"id": "test", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "test",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test": {
                 "enable_thinking": False,
@@ -1843,13 +1931,18 @@ class TestZedIntegration:
 
         with (
             patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
             patch("omlx.integrations.zed.shutil.which", return_value=None),
         ):
             with pytest.raises(SystemExit):
-                zed.launch(ctx(port=8000, api_key="key", model="test"))
+                zed.launch(
+                    ctx(
+                        port=8000,
+                        api_key="key",
+                        model="test",
+                        all_models=all_models,
+                        all_models_status=status_map,
+                    )
+                )
 
         captured = capsys.readouterr()
         assert "zed not found" in captured.out.lower() or "zed" in captured.out.lower()
@@ -1865,7 +1958,15 @@ class TestZedIntegration:
             nonlocal execvpe_called
             execvpe_called = True
 
-        all_models = [{"id": "test", "max_model_len": 32768}]
+        all_models = [
+            {
+                "id": "test",
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        ]
         status_map = {
             "test": {
                 "enable_thinking": False,
@@ -1877,14 +1978,19 @@ class TestZedIntegration:
 
         with (
             patch.object(ZedIntegration, "CONFIG_PATH", config_path),
-            patch.object(
-                zed, "_fetch_models", return_value=(all_models, status_map)
-            ),
             patch("omlx.integrations.zed.shutil.which", return_value=None),
             patch("omlx.integrations.zed.os.execvpe", side_effect=fake_execvpe),
         ):
             with pytest.raises(SystemExit):
-                zed.launch(ctx(port=8000, api_key="key", model="test"))
+                zed.launch(
+                    ctx(
+                        port=8000,
+                        api_key="key",
+                        model="test",
+                        all_models=all_models,
+                        all_models_status=status_map,
+                    )
+                )
 
         assert execvpe_called is False
 
@@ -1916,3 +2022,203 @@ class TestZedIntegration:
         assert zed._is_reasoning_model("some-thinking-no-thinking-model") is False
         assert zed._is_reasoning_model("some-think-nothink-model") is False
         assert zed._is_reasoning_model("qwen3.5-no-thinking") is False
+
+
+def _zed_models(*ids):
+    """Build (all_models, status_map) for Zed configure tests."""
+    all_models = [
+        {
+            "id": mid,
+            "enable_thinking": False,
+            "max_context_window": 32768,
+            "max_tokens": 4096,
+            "model_type": "llm",
+        }
+        for mid in ids
+    ]
+    return all_models, {m["id"]: dict(m) for m in all_models}
+
+
+class TestZedConfigPreservation:
+    """Zed writes JSONC; configuring must not destroy comments or other keys."""
+
+    def test_configure_preserves_comments_and_trailing_commas(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        config_path.write_text(
+            "// My Zed settings\n"
+            "// keep these comments\n"
+            "{\n"
+            '  "theme": "Andromeda", // inline comment\n'
+            '  "language_models": {\n'
+            '    "lmstudio": {"api_url": "http://localhost:1234/v1"},\n'
+            "  },\n"
+            "}\n"
+        )
+
+        all_models, status = _zed_models("test-model")
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            ZedIntegration().configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="test-model",
+                    all_models=all_models,
+                    all_models_status=status,
+                )
+            )
+
+        text = config_path.read_text()
+        # Comments survive.
+        assert "// My Zed settings" in text
+        assert "// keep these comments" in text
+        assert "// inline comment" in text
+        # Unrelated settings and sibling provider survive.
+        config = _jsonc_loads(text)
+        assert config["theme"] == "Andromeda"
+        assert "lmstudio" in config["language_models"]
+        # oMLX added.
+        assert "oMLX" in config["language_models"]["openai_compatible"]
+        assert config["agent"]["default_model"]["model"] == "test-model"
+
+    def test_configure_does_not_overwrite_unparseable_file(self, tmp_path):
+        """The core regression: a file we cannot parse must be left untouched."""
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        original = "this is not json at all ][ }{ \n totally broken"
+        config_path.write_text(original)
+
+        all_models, status = _zed_models("test-model")
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            ZedIntegration().configure(
+                ctx(
+                    port=8000,
+                    api_key="key",
+                    model="test-model",
+                    all_models=all_models,
+                    all_models_status=status,
+                )
+            )
+
+        # File is byte-for-byte unchanged; nothing was bulldozed.
+        assert config_path.read_text() == original
+        # And no stray backup/config was written next to it.
+        assert list(tmp_path.glob("settings.*.bak")) == []
+
+    def test_configure_replaces_existing_omlx_but_keeps_comments(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        config_path.write_text(
+            "// header\n"
+            "{\n"
+            '  "language_models": {\n'
+            '    "openai_compatible": {\n'
+            '      "oMLX": {"api_url": "http://old:1/v1", "available_models": []}\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+
+        all_models, status = _zed_models("m1", "m2")
+        with patch.object(ZedIntegration, "CONFIG_PATH", config_path):
+            ZedIntegration().configure(
+                ctx(
+                    port=8642,
+                    api_key="key",
+                    model="m1",
+                    all_models=all_models,
+                    all_models_status=status,
+                )
+            )
+
+        text = config_path.read_text()
+        assert "// header" in text
+        config = _jsonc_loads(text)
+        provider = config["language_models"]["openai_compatible"]["oMLX"]
+        assert provider["api_url"] == "http://127.0.0.1:8642/v1"
+        assert {m["name"] for m in provider["available_models"]} == {"m1", "m2"}
+
+
+def _jsonc_loads(text):
+    from omlx.integrations import _jsonc
+
+    return _jsonc.loads(text)
+
+
+class TestJsoncEditing:
+    def test_loads_parses_comments_and_trailing_commas(self):
+        from omlx.integrations import _jsonc
+
+        text = '// c\n{\n  "a": 1, /* b */\n  "b": [1, 2,],\n}\n'
+        assert _jsonc.loads(text) == {"a": 1, "b": [1, 2]}
+
+    def test_loads_raises_on_garbage(self):
+        from omlx.integrations import _jsonc
+
+        with pytest.raises(_jsonc.JsoncError):
+            _jsonc.loads("not json ][")
+
+    def test_set_path_replaces_value_preserving_comment(self):
+        from omlx.integrations import _jsonc
+
+        text = '{\n  "a": 1, // keep me\n  "b": 2\n}\n'
+        out = _jsonc.set_path(text, ("a",), 99)
+        assert "// keep me" in out
+        assert _jsonc.loads(out) == {"a": 99, "b": 2}
+
+    def test_set_path_inserts_new_key_preserving_others(self):
+        from omlx.integrations import _jsonc
+
+        text = '// top\n{\n  "a": 1\n}\n'
+        out = _jsonc.set_path(text, ("new",), {"x": True})
+        assert "// top" in out
+        assert _jsonc.loads(out) == {"a": 1, "new": {"x": True}}
+
+    def test_set_path_creates_intermediate_objects(self):
+        from omlx.integrations import _jsonc
+
+        text = '{\n  "a": 1\n}\n'
+        out = _jsonc.set_path(text, ("deep", "nested", "key"), 5)
+        assert _jsonc.loads(out) == {"a": 1, "deep": {"nested": {"key": 5}}}
+
+    def test_set_path_into_empty_object(self):
+        from omlx.integrations import _jsonc
+
+        out = _jsonc.set_path("{}", ("k",), "v")
+        assert _jsonc.loads(out) == {"k": "v"}
+
+    def test_apply_updates_preserves_comments_and_roundtrips(self):
+        from omlx.integrations import _jsonc
+
+        text = '// hi\n{\n  "keep": 1, // note\n  "prov": {"old": true}\n}\n'
+
+        def updater(cfg):
+            cfg.setdefault("prov", {})["new"] = 2
+
+        out = _jsonc.apply_updates(text, updater)
+        assert "// hi" in out and "// note" in out
+        assert _jsonc.loads(out) == {"keep": 1, "prov": {"old": True, "new": 2}}
+
+    def test_apply_updates_falls_back_on_removal_but_keeps_header(self):
+        from omlx.integrations import _jsonc
+
+        text = '// header comment\n{\n  "drop": 1,\n  "keep": 2\n}\n'
+
+        def updater(cfg):
+            cfg.pop("drop")
+            cfg["keep"] = 3
+
+        out = _jsonc.apply_updates(text, updater)
+        # Removal can't be spliced, so we reserialize -- but the leading
+        # comment block is retained and the data is correct.
+        assert out.startswith("// header comment")
+        assert _jsonc.loads(out) == {"keep": 3}
+
+    def test_apply_updates_raises_on_unparseable(self):
+        from omlx.integrations import _jsonc
+
+        with pytest.raises(_jsonc.JsoncError):
+            _jsonc.apply_updates("][ broken", lambda c: None)

@@ -89,6 +89,10 @@ dependencies = [
     "python-multipart>=0.0.5",
     # JSON Schema validation for structured output
     "jsonschema>=4.0.0",
+    # JSON5/JSONC parsing for editor configs (Zed's settings.json is JSONC).
+    # Dirk Pranke's parser; used to understand comment-bearing configs so the
+    # launch integration edits them in place instead of overwriting them.
+    "json5>=0.9.0",
     # Harmony format parser for gpt-oss models
     "openai-harmony",
     # Cohere Command/Cohere2 output parser for reasoning and tool calls

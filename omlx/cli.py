@@ -430,35 +430,36 @@ def launch_command(args, extra_args: list[str] | None = None):
     except Exception:
         pass
 
+    # Pre-fetch available models list (also used for all_models in IntegrationContext)
+    models_list: list[str] = []
+    try:
+        resp = requests.get(f"{base_url}/v1/models", headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        models_list = [
+            m["id"]
+            for m in data.get("data", [])
+            if m.get("model_type") in ("llm", "vlm", None)
+        ]
+    except Exception:
+        pass
+
     # Determine model. Explicit CLI tier flags bypass the picker; otherwise always
     # prompt interactively so the user's selection is honoured.
     model = args.model
     if not model and (cli_opus_model or cli_sonnet_model or cli_haiku_model):
         model = cli_sonnet_model or cli_opus_model or cli_haiku_model or ""
     elif not model:
-        # Fetch available models from server
-        try:
-            resp = requests.get(f"{base_url}/v1/models", headers=headers, timeout=5)
-            resp.raise_for_status()
-            data = resp.json()
-            models = [
-                m["id"]
-                for m in data.get("data", [])
-                if m.get("model_type") in ("llm", "vlm", None)
-            ]
-        except Exception:
-            models = []
-
-        if not models:
+        if not models_list:
             print("No models available. Load a model first.")
             sys.exit(1)
 
-        if len(models) == 1:
-            model = models[0]
+        if len(models_list) == 1:
+            model = models_list[0]
             print(f"Using model: {model}")
         else:
             models_info_list = [
-                {"id": m_id, **models_status_map.get(m_id, {})} for m_id in models
+                {"id": m_id, **models_status_map.get(m_id, {})} for m_id in models_list
             ]
             model = integration.select_model(models_info_list, integration.display_name)
 
@@ -478,6 +479,12 @@ def launch_command(args, extra_args: list[str] | None = None):
 
     # Resolve model limits from pre-fetched status
     model_info = models_status_map.get(model, {})
+
+    # Build all_models: list of dicts with id + status fields merged
+    all_models = [
+        {"id": m_id, **models_status_map.get(m_id, {})} for m_id in models_list
+    ]
+
     ctx = IntegrationContext(
         host=connect_host,
         port=port,
@@ -492,6 +499,8 @@ def launch_command(args, extra_args: list[str] | None = None):
         reasoning=model_info.get("enable_thinking"),
         tools_profile=getattr(args, "tools_profile", "coding"),
         extra_args=tuple(extra_args or ()),
+        all_models=all_models,
+        all_models_status=models_status_map,
     )
 
     # Launch
