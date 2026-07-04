@@ -32,7 +32,7 @@ def ctx(**overrides) -> IntegrationContext:
 class TestIntegrationRegistry:
     def test_list_integrations(self):
         integrations = list_integrations()
-        assert len(integrations) == 8
+        assert len(integrations) == 9
         names = {i.name for i in integrations}
         assert names == {
             "claude",
@@ -43,6 +43,7 @@ class TestIntegrationRegistry:
             "openclaw",
             "hermes",
             "pi",
+            "zed",
         }
 
     def test_get_integration(self):
@@ -1529,3 +1530,317 @@ class TestIntegrationSettings:
 
         settings = IntegrationSettings.from_dict({})
         assert settings.codex_model is None
+
+
+class TestZedIntegration:
+    def test_get_command(self):
+        from omlx.integrations.zed import ZedIntegration
+
+        zed = ZedIntegration()
+        cmd = zed.get_command(ctx(port=8000, api_key="key", model="qwen3.5"))
+        assert "omlx launch zed" in cmd
+        assert "--model qwen3.5" in cmd
+
+    def test_get_command_no_model(self):
+        from omlx.integrations.zed import ZedIntegration
+
+        zed = ZedIntegration()
+        cmd = zed.get_command(ctx(port=8000, api_key="", model=""))
+        assert "omlx launch zed" in cmd
+        assert "--model select-a-model" in cmd
+
+    def test_configure_new_file(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+
+        # Mock the API calls
+        all_models = [
+            {"id": "qwen3.5", "max_model_len": 131072},
+            {"id": "llama-3b", "max_model_len": 32768},
+        ]
+        status_map = {
+            "qwen3.5": {
+                "enable_thinking": True,
+                "max_context_window": 131072,
+                "max_tokens": 8192,
+                "model_type": "llm",
+            },
+            "llama-3b": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            },
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="test-key", model="qwen3.5"))
+
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+
+        # Provider config
+        provider = config["language_models"]["openai_compatible"]["oMLX"]
+        assert provider["api_url"] == "http://127.0.0.1:8000/v1"
+        assert len(provider["available_models"]) == 2
+
+        # Check reasoning model
+        qwen = next(m for m in provider["available_models"] if m["name"] == "qwen3.5")
+        assert qwen["max_tokens"] == 131072
+        assert qwen["max_output_tokens"] == 8192
+        assert qwen["reasoning_effort"] == "high"
+        assert qwen["capabilities"]["tools"] is True
+        assert qwen["capabilities"]["images"] is False
+        assert qwen["capabilities"]["chat_completions"] is True
+        assert qwen["capabilities"]["interleaved_reasoning"] is True
+
+        # Check non-reasoning model
+        llama = next(m for m in provider["available_models"] if m["name"] == "llama-3b")
+        assert llama["max_tokens"] == 32768
+        assert llama["max_output_tokens"] == 4096
+        assert "reasoning_effort" not in llama
+        assert llama["capabilities"]["interleaved_reasoning"] is False
+
+        # Default model
+        assert config["agent"]["default_model"]["provider"] == "oMLX"
+        assert config["agent"]["default_model"]["model"] == "qwen3.5"
+        assert config["agent"]["default_model"]["enable_thinking"] is True
+
+    def test_configure_vlm_model(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+
+        all_models = [{"id": "bakllava-1", "max_model_len": 4096}]
+        status_map = {
+            "bakllava-1": {
+                "enable_thinking": False,
+                "max_context_window": 4096,
+                "max_tokens": 512,
+                "model_type": "vlm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="key", model="bakllava-1"))
+
+        config = json.loads(config_path.read_text())
+        model = config["language_models"]["openai_compatible"]["oMLX"][
+            "available_models"
+        ][0]
+        assert model["name"] == "bakllava-1"
+        assert model["capabilities"]["images"] is True
+
+    def test_configure_preserves_existing(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        existing = {
+            "show_edit_predictions": False,
+            "language_models": {
+                "lmstudio": {"api_url": "http://localhost:1234/v1"}
+            },
+            "theme": {"mode": "system"},
+        }
+        config_path.write_text(json.dumps(existing))
+
+        zed = ZedIntegration()
+        all_models = [{"id": "test-model", "max_model_len": 32768}]
+        status_map = {
+            "test-model": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="key", model="test-model"))
+
+        config = json.loads(config_path.read_text())
+        # Existing preserved
+        assert config["show_edit_predictions"] is False
+        assert "lmstudio" in config["language_models"]
+        assert config["theme"]["mode"] == "system"
+        # oMLX added
+        assert "oMLX" in config["language_models"]["openai_compatible"]
+        assert config["agent"]["default_model"]["model"] == "test-model"
+
+    def test_configure_creates_backup(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        config_path.write_text('{"existing": true}')
+
+        zed = ZedIntegration()
+        all_models = [{"id": "test", "max_model_len": 1000}]
+        status_map = {
+            "test": {
+                "enable_thinking": False,
+                "max_context_window": 1000,
+                "max_tokens": 100,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="", model="test"))
+
+        backups = list(tmp_path.glob("settings.*.bak"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text()) == {"existing": True}
+
+    def test_configure_reasoning_false_for_non_reasoning_model(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+
+        all_models = [{"id": "llama-3b", "max_model_len": 32768}]
+        status_map = {
+            "llama-3b": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="key", model="llama-3b"))
+
+        config = json.loads(config_path.read_text())
+        model = config["language_models"]["openai_compatible"]["oMLX"][
+            "available_models"
+        ][0]
+        assert "reasoning_effort" not in model
+        assert config["agent"]["default_model"]["enable_thinking"] is False
+
+    def test_configure_no_model(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+
+        all_models = [{"id": "test", "max_model_len": 32768}]
+        status_map = {
+            "test": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+        ):
+            zed.configure(ctx(port=8000, api_key="key", model=""))
+
+        config = json.loads(config_path.read_text())
+        # Provider config should still be written
+        assert "oMLX" in config["language_models"]["openai_compatible"]
+        # But no default_model section
+        assert "agent" not in config or "default_model" not in config.get(
+            "agent", {}
+        )
+
+    def test_launch_sets_api_key_env(self, tmp_path):
+        from omlx.integrations.zed import ZedIntegration
+
+        config_path = tmp_path / "settings.json"
+        zed = ZedIntegration()
+        captured = {}
+
+        def fake_execvpe(binary, argv, env):
+            captured["binary"] = binary
+            captured["argv"] = argv
+            captured["env"] = env
+
+        base_env = {
+            "PATH": "/usr/bin",
+            "PYTHONHOME": "/bundle/python",
+            "PYTHONPATH": "/bundle/lib",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        all_models = [{"id": "test", "max_model_len": 32768}]
+        status_map = {
+            "test": {
+                "enable_thinking": False,
+                "max_context_window": 32768,
+                "max_tokens": 4096,
+                "model_type": "llm",
+            }
+        }
+
+        with (
+            patch.object(ZedIntegration, "CONFIG_PATH", config_path),
+            patch.object(
+                zed, "_fetch_models", return_value=(all_models, status_map)
+            ),
+            patch("omlx.integrations.zed.os.environ", base_env),
+            patch("omlx.integrations.zed.os.execvpe", side_effect=fake_execvpe),
+        ):
+            zed.launch(ctx(port=8000, api_key="secret-key", model="test"))
+
+        assert captured["binary"] == "zed"
+        assert captured["argv"] == ["zed"]
+        assert captured["env"]["OMLX_API_KEY"] == "secret-key"
+        assert "PYTHONHOME" not in captured["env"]
+        assert "PYTHONPATH" not in captured["env"]
+        assert "PYTHONDONTWRITEBYTECODE" not in captured["env"]
+
+    def test_type(self):
+        from omlx.integrations.zed import ZedIntegration
+
+        zed = ZedIntegration()
+        assert zed.type == "config_file"
+        assert zed.display_name == "Zed"
+        assert zed.name == "zed"
+        assert zed.install_check == "zed"
+
+    def test_is_reasoning_model(self):
+        from omlx.integrations.zed import ZedIntegration
+
+        zed = ZedIntegration()
+        assert zed._is_reasoning_model("o3-mini") is True
+        assert zed._is_reasoning_model("DeepSeek-R1") is True
+        assert zed._is_reasoning_model("o1-preview") is True
+        assert zed._is_reasoning_model("gpt-o3") is True
+        assert zed._is_reasoning_model("llama-3b") is False
+        assert zed._is_reasoning_model("qwen3.5") is False
+        assert zed._is_reasoning_model(None) is False
+        assert zed._is_reasoning_model("") is False
