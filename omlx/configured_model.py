@@ -14,10 +14,10 @@ it to use this object if practical.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .engine_pool import EngineEntry
-from .model_settings import ModelSettings
+from .model_settings import ModelSettings, merge_chat_template_kwargs
 
 if TYPE_CHECKING:
     # SamplingDefaults lives in server.py, which imports this module.
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-def first_present(*args: Optional[T]) -> Optional[T]:
+def first_present(*args: T | None) -> T | None:
     """The first non-None value passed, or None if all are None."""
     for x in args:
         if x is not None:
@@ -34,13 +34,15 @@ def first_present(*args: Optional[T]) -> Optional[T]:
     return None
 
 
-_EMPTY_ENGINE_ENTRY = EngineEntry(
-    model_id="",
-    model_path="",
-    model_type="llm",
-    engine_type="batched",
-    estimated_size=0,
-)
+def _empty_engine_entry() -> EngineEntry:
+    """A placeholder entry for an unknown model: every default is ``None``."""
+    return EngineEntry(
+        model_id="",
+        model_path="",
+        model_type="llm",
+        engine_type="batched",
+        estimated_size=0,
+    )
 
 
 @dataclass(frozen=True)
@@ -62,29 +64,45 @@ class ConfiguredModel:
     model_entry: EngineEntry
     sampling: SamplingDefaults
 
+    def _settings_template_kwargs(self) -> dict[str, Any]:
+        """Chat-template kwargs the settings layer sends absent request overrides.
+
+        Delegates to the same helper the request path uses, so the reported
+        state cannot drift from what is actually rendered.
+        """
+        return merge_chat_template_kwargs(
+            self.settings,
+            None,
+            preserve_thinking_default=self.model_entry.preserve_thinking_default,
+        )
+
     @property
-    def enable_thinking(self) -> Optional[bool]:
+    def enable_thinking(self) -> bool | None:
         """Effective thinking state as the engine will serve it.
 
-        ``settings.enable_thinking`` (the explicit toggle from Model settings)
-        takes precedence; otherwise the model's chat-template default
-        (``model_entry.thinking_default``). ``None`` means the model exposes no
-        thinking toggle.
+        Resolved the way the request path renders it: the dedicated
+        ``settings.enable_thinking`` toggle, else ``settings.chat_template_kwargs``,
+        else an active thinking budget (which switches thinking on), else the
+        model's chat-template default (``model_entry.thinking_default``).
+        ``None`` means the model exposes no thinking toggle.
         """
         return first_present(
-            self.settings.enable_thinking,
+            self._settings_template_kwargs().get("enable_thinking"),
             self.model_entry.thinking_default,
         )
 
     @property
-    def preserve_thinking(self) -> Optional[bool]:
+    def preserve_thinking(self) -> bool | None:
         """Effective ``preserve_thinking`` state (keep <think> blocks in
-        historical turns), resolved the same way as :attr:`enable_thinking`.
+        historical turns).
+
+        Follows the request path: the dedicated toggle, else
+        ``settings.chat_template_kwargs``, else ``True`` when the template
+        supports the flag (``model_entry.preserve_thinking_default``) and
+        thinking is not switched off. ``None`` when the template has no such
+        flag.
         """
-        return first_present(
-            self.settings.preserve_thinking,
-            self.model_entry.preserve_thinking_default,
-        )
+        return self._settings_template_kwargs().get("preserve_thinking")
 
     @property
     def max_context_window(self) -> int | None:
@@ -134,10 +152,10 @@ def new_configured_model(
 ) -> ConfiguredModel:
     """Build a ConfiguredModel, filling absent layers with defaults."""
     # Lazy import: SamplingDefaults lives in server.py, which imports us.
-    from .server import SamplingDefaults as _SD
+    from .server import SamplingDefaults
 
     return ConfiguredModel(
-        settings=settings or ModelSettings(),
-        model_entry=model_entry or _EMPTY_ENGINE_ENTRY,
-        sampling=sampling or _SD(),
+        settings=ModelSettings() if settings is None else settings,
+        model_entry=_empty_engine_entry() if model_entry is None else model_entry,
+        sampling=SamplingDefaults() if sampling is None else sampling,
     )

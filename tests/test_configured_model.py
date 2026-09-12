@@ -6,9 +6,6 @@ clients (per-model override > template default) and the context/token limits
 (per-model override > policy-clamped discovered value > global default).
 """
 
-from dataclasses import dataclass
-
-import pytest
 
 from omlx.configured_model import new_configured_model
 from omlx.engine_pool import EngineEntry
@@ -29,65 +26,111 @@ def entry(**kwargs) -> EngineEntry:
     )
 
 
-@dataclass
-class FakeEntry:
-    """Duck-typed stand-in for EngineEntry's relevant fields."""
-
-    model_id: str = ""
-    model_path: str = ""
-    model_type: str = "llm"
-    engine_type: str = "batched"
-    estimated_size: int = 0
-    thinking_default: bool | None = None
-    preserve_thinking_default: bool | None = None
-    model_context_length: int | None = None
-
-
-@dataclass
-class FakeSampling:
-    """Duck-typed stand-in for SamplingDefaults' relevant fields."""
-
-    max_context_window: int = 32768
-    max_context_window_policy: int | None = None
-    max_tokens: int = 32768
-
-
 class TestEnableThinking:
+    """Mirrors the request path: toggle > chat_template_kwargs > thinking
+    budget > template default."""
+
     def test_override_true_wins(self):
-        cm = new_configured_model(ModelSettings(enable_thinking=True), FakeEntry(thinking_default=False))
+        cm = new_configured_model(
+            ModelSettings(enable_thinking=True), entry(thinking_default=False)
+        )
         assert cm.enable_thinking is True
 
     def test_override_false_wins(self):
-        cm = new_configured_model(ModelSettings(enable_thinking=False), FakeEntry(thinking_default=True))
+        cm = new_configured_model(
+            ModelSettings(enable_thinking=False), entry(thinking_default=True)
+        )
         assert cm.enable_thinking is False
 
     def test_falls_back_to_template_default(self):
         # Qwen-style: thinks by default; user left the toggle on auto.
-        cm = new_configured_model(ModelSettings(enable_thinking=None), FakeEntry(thinking_default=True))
+        cm = new_configured_model(
+            ModelSettings(enable_thinking=None), entry(thinking_default=True)
+        )
         assert cm.enable_thinking is True
 
     def test_no_toggle_is_none(self):
         # Model exposes no thinking toggle and the user set no override.
-        cm = new_configured_model(ModelSettings(enable_thinking=None), FakeEntry(thinking_default=None))
+        cm = new_configured_model(
+            ModelSettings(enable_thinking=None), entry(thinking_default=None)
+        )
         assert cm.enable_thinking is None
 
     def test_no_entry_uses_override_only(self):
         assert new_configured_model(ModelSettings(enable_thinking=True)).enable_thinking is True
         assert new_configured_model(ModelSettings()).enable_thinking is None
 
+    def test_chat_template_kwargs_beat_template_default(self):
+        # The admin UI can also set enable_thinking as a raw template kwarg;
+        # that is what gets rendered, so it must be what gets reported.
+        cm = new_configured_model(
+            ModelSettings(chat_template_kwargs={"enable_thinking": False}),
+            entry(thinking_default=True),
+        )
+        assert cm.enable_thinking is False
+
+    def test_toggle_beats_chat_template_kwargs(self):
+        cm = new_configured_model(
+            ModelSettings(
+                enable_thinking=True,
+                chat_template_kwargs={"enable_thinking": False},
+            ),
+            entry(thinking_default=None),
+        )
+        assert cm.enable_thinking is True
+
+    def test_thinking_budget_switches_thinking_on(self):
+        # A positive budget forces enable_thinking=True at render time when
+        # nothing else set it (Gemma 4 templates suppress thinking otherwise).
+        cm = new_configured_model(
+            ModelSettings(thinking_budget_enabled=True, thinking_budget_tokens=512),
+            entry(thinking_default=False),
+        )
+        assert cm.enable_thinking is True
+
+    def test_disabled_budget_does_not_switch_thinking_on(self):
+        cm = new_configured_model(
+            ModelSettings(thinking_budget_enabled=False, thinking_budget_tokens=512),
+            entry(thinking_default=False),
+        )
+        assert cm.enable_thinking is False
+
 
 class TestPreserveThinking:
+    """Mirrors the request path: toggle > chat_template_kwargs > template
+    support, the last only while thinking is not switched off."""
+
     def test_override_wins(self):
         cm = new_configured_model(
-            ModelSettings(preserve_thinking=False), FakeEntry(preserve_thinking_default=True)
+            ModelSettings(preserve_thinking=False), entry(preserve_thinking_default=True)
         )
         assert cm.preserve_thinking is False
 
     def test_falls_back_to_default(self):
         cm = new_configured_model(
-            ModelSettings(preserve_thinking=None), FakeEntry(preserve_thinking_default=True)
+            ModelSettings(preserve_thinking=None), entry(preserve_thinking_default=True)
         )
         assert cm.preserve_thinking is True
+
+    def test_unsupported_template_is_none(self):
+        cm = new_configured_model(ModelSettings(), entry(preserve_thinking_default=None))
+        assert cm.preserve_thinking is None
+
+    def test_default_not_applied_when_thinking_disabled(self):
+        # preserve_thinking_default only means "the template has the flag";
+        # with thinking off the request path does not send it.
+        cm = new_configured_model(
+            ModelSettings(enable_thinking=False),
+            entry(thinking_default=True, preserve_thinking_default=True),
+        )
+        assert cm.preserve_thinking is None
+
+    def test_chat_template_kwargs_layer(self):
+        cm = new_configured_model(
+            ModelSettings(chat_template_kwargs={"preserve_thinking": False}),
+            entry(preserve_thinking_default=True),
+        )
+        assert cm.preserve_thinking is False
 
 
 class TestMaxContextWindow:
@@ -215,13 +258,11 @@ class TestMaxContextWindow:
 
 class TestMaxTokens:
     def test_settings_wins_over_sampling(self):
-        cm = new_configured_model(ModelSettings(max_tokens=4096), sampling=FakeSampling(max_tokens=32768))
+        cm = new_configured_model(
+            ModelSettings(max_tokens=4096), sampling=SamplingDefaults(max_tokens=32768)
+        )
         assert cm.max_tokens == 4096
 
     def test_falls_to_sampling(self):
-        cm = new_configured_model(ModelSettings(), sampling=FakeSampling(max_tokens=8192))
+        cm = new_configured_model(ModelSettings(), sampling=SamplingDefaults(max_tokens=8192))
         assert cm.max_tokens == 8192
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

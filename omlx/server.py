@@ -295,9 +295,9 @@ def model_config(model_id: str | None) -> ConfiguredModel:
     ``EngineEntry`` is looked up for the physical model it resolves to. An
     unknown model yields a ``ConfiguredModel`` carrying only sampling defaults.
     """
-    settings = get_model_settings_for_request(model_id)
-    entry = None
     resolved_model_id = resolve_model_id(model_id)
+    settings = get_model_settings_for_request(model_id, resolved_model_id)
+    entry = None
     pool = _server_state.engine_pool
     if resolved_model_id and pool is not None:
         entry = pool.get_entry(resolved_model_id)
@@ -1885,13 +1885,21 @@ def _resolve_thinking_budget(request, model_id: str | None) -> int | None:
     return None
 
 
-def get_model_settings_for_request(model_id: str | None):
-    """Return settings for the requested API model name via ModelSettingsManager."""
+def get_model_settings_for_request(
+    model_id: str | None,
+    resolved_model_id: str | None = None,
+):
+    """Return settings for the requested API model name via ModelSettingsManager.
+
+    ``resolved_model_id`` may be passed when the caller has already resolved
+    the alias, to avoid a second lookup.
+    """
     sm = _server_state.settings_manager
     if not model_id or sm is None:
         return None
 
-    resolved_model_id = resolve_model_id(model_id)
+    if resolved_model_id is None:
+        resolved_model_id = resolve_model_id(model_id)
     if not hasattr(sm, "get_settings_for_request"):
         return sm.get_settings(resolved_model_id or model_id)
 
