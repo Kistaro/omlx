@@ -130,9 +130,9 @@ class HermesIntegration(Integration):
             model_config.pop("max_tokens", None)
         config["model"] = model_config
 
-        # Hermes exposes a single reasoning knob, agent.reasoning_effort
-        # ("none".."xhigh", default "medium"). Only write the key on an
-        # explicit reasoning signal; otherwise, stick with the default.
+        # Hermes' only reasoning knob is agent.reasoning_effort ("none".."xhigh",
+        # default "medium"). Write it only on an explicit signal so the
+        # default stands otherwise.
         agent_config = config.get("agent", {})
         if not isinstance(agent_config, dict):
             agent_config = {}

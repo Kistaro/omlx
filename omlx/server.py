@@ -288,12 +288,11 @@ _server_state: ServerState = ServerState()
 
 
 def model_config(model_id: str | None) -> ConfiguredModel:
-    """Return the resolved configuration layers for an API model name.
+    """Resolved configuration for an API model name.
 
-    ``model_id`` may be an alias or an exposed profile ID: settings are looked
-    up for the name as requested (so profile overrides apply) while the
-    ``EngineEntry`` is looked up for the physical model it resolves to. An
-    unknown model yields a ``ConfiguredModel`` carrying only sampling defaults.
+    ``model_id`` may be an alias or an exposed-profile ID; profile overrides
+    apply and the entry is the physical model's. An unknown model gets only
+    the sampling defaults.
     """
     resolved_model_id = resolve_model_id(model_id)
     settings = get_model_settings_for_request(model_id, resolved_model_id)
@@ -1891,8 +1890,7 @@ def get_model_settings_for_request(
 ):
     """Return settings for the requested API model name via ModelSettingsManager.
 
-    ``resolved_model_id`` may be passed when the caller has already resolved
-    the alias, to avoid a second lookup.
+    Pass ``resolved_model_id`` if already known to skip resolving it again.
     """
     sm = _server_state.settings_manager
     if not model_id or sm is None:
@@ -2011,16 +2009,8 @@ def _get_ocr_defaults(model_id: str | None) -> dict | None:
 
 
 def get_max_context_window(model_id: str | None = None) -> int | None:
-    """Get effective max context window limit.
-
-    See :attr:`ConfiguredModel.max_context_window` for the resolution order
-    (per-model override > policy-clamped native context > fallback default).
-
-    Returns:
-        Max context window token count, or ``None`` if no tier resolves
-        (only possible when neither the model nor the global default
-        provides a value, which shouldn't happen in practice).
-    """
+    """Context limit in tokens for an API model name; see
+    :attr:`ConfiguredModel.max_context_window` for how it is chosen."""
     return model_config(model_id).max_context_window
 
 
@@ -3325,7 +3315,6 @@ async def list_models_status(_: bool = Depends(verify_api_key)):
             m["is_hidden"] = False
             continue
 
-        # Effective values: model setting > model default > global default
         config = model_config(model_id)
         m["max_context_window"] = config.max_context_window
         m["max_tokens"] = config.max_tokens

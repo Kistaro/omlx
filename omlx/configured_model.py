@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Centralized resolution for model configurations.
+"""Resolve a model's effective settings across the layers that define them.
 
-In general, model settings override model defaults, and model defaults
-override sampling defaults. Settings not related to sampling are expected
-to be absent from sampling defaults, and not all of these settings objects
-use the same name for the same concept.
-
-This object is intended to be incrementally extended and incrementally
-adopted: when updating code that performs this kind of resolution, migrate
-it to use this object if practical.
+Per-model settings win over the model's own defaults, which win over the
+server's sampling defaults. Code that resolves a setting across these layers
+should go through ConfiguredModel rather than repeat the lookup.
 """
 
 from __future__ import annotations
@@ -20,7 +15,7 @@ from .engine_pool import EngineEntry
 from .model_settings import ModelSettings, merge_chat_template_kwargs
 
 if TYPE_CHECKING:
-    # SamplingDefaults lives in server.py, which imports this module.
+    # Circular at runtime: server.py imports this module.
     from .server import SamplingDefaults
 
 T = TypeVar("T")
@@ -35,7 +30,7 @@ def first_present(*args: T | None) -> T | None:
 
 
 def _empty_engine_entry() -> EngineEntry:
-    """A placeholder entry for an unknown model: every default is ``None``."""
+    """An entry with no discovered defaults, for models the pool does not know."""
     return EngineEntry(
         model_id="",
         model_path="",
@@ -47,29 +42,23 @@ def _empty_engine_entry() -> EngineEntry:
 
 @dataclass(frozen=True)
 class ConfiguredModel:
-    """A model, its configuration, and its sources for fallback settings.
+    """A model's settings, its discovered defaults, and the server's sampling
+    defaults, with accessors that resolve each effective value across them.
 
-    Every layer is always present. Layers with no real data use default-
-    constructed instances (e.g. ``ModelSettings()`` with every field
-    ``None``, an ``EngineEntry`` with empty strings and zeroes, etc.).
-    This keeps property accessors simple -- no ``None`` guards needed.
-    However, multilayer resolution will not continue past a field that
-    has a default value; currently this does not affect any lookups
-    but an alternative approach may be required in the future.
+    Build with :func:`new_configured_model`; every layer must be present.
     """
-
-    # Priority is generally settings > model_entry > sampling.
 
     settings: ModelSettings
     model_entry: EngineEntry
     sampling: SamplingDefaults
+    # Accessors take the first non-None value: settings, then model_entry,
+    # then sampling. A layer falls through only on a field whose default
+    # is None, so give new fields a None default, not a real value.
 
     def _settings_template_kwargs(self) -> dict[str, Any]:
-        """Chat-template kwargs the settings layer sends absent request overrides.
-
-        Delegates to the same helper the request path uses, so the reported
-        state cannot drift from what is actually rendered.
-        """
+        """Chat-template kwargs the settings layer sends when a request overrides nothing."""
+        # Same helper as the request path, so what we report cannot drift
+        # from what gets rendered.
         return merge_chat_template_kwargs(
             self.settings,
             None,
@@ -78,14 +67,10 @@ class ConfiguredModel:
 
     @property
     def enable_thinking(self) -> bool | None:
-        """Effective thinking state as the engine will serve it.
-
-        Resolved the way the request path renders it: the dedicated
-        ``settings.enable_thinking`` toggle, else ``settings.chat_template_kwargs``,
-        else an active thinking budget (which switches thinking on), else the
-        model's chat-template default (``model_entry.thinking_default``).
-        ``None`` means the model exposes no thinking toggle.
-        """
+        """Whether the model will think: the per-model toggle, else the
+        ``chat_template_kwargs`` value, else ``True`` if a thinking budget is
+        active, else the template's default. ``None`` if the model has no
+        thinking switch."""
         return first_present(
             self._settings_template_kwargs().get("enable_thinking"),
             self.model_entry.thinking_default,
@@ -93,43 +78,21 @@ class ConfiguredModel:
 
     @property
     def preserve_thinking(self) -> bool | None:
-        """Effective ``preserve_thinking`` state (keep <think> blocks in
-        historical turns).
-
-        Follows the request path: the dedicated toggle, else
-        ``settings.chat_template_kwargs``, else ``True`` when the template
-        supports the flag (``model_entry.preserve_thinking_default``) and
-        thinking is not switched off. ``None`` when the template has no such
-        flag.
-        """
+        """Whether earlier ``<think>`` blocks are kept when rendering history:
+        the per-model toggle, else the ``chat_template_kwargs`` value, else
+        ``True`` when the template supports it and thinking is on. ``None``
+        if the template has no such flag."""
         return self._settings_template_kwargs().get("preserve_thinking")
 
     @property
     def max_context_window(self) -> int | None:
-        """Effective max context window limit.
-
-        Resolution:
-            1. **Per-model override** (admin UI / settings.json) -- always
-               wins. An operator who has set a per-model number knows what
-               they want; ``max_context_window_policy`` does not clamp it.
-            2. **Model-config-discovered native context length** (#1308),
-               optionally clamped by the operator policy: if
-               ``sampling.max_context_window_policy`` is set, use
-               ``min(native, policy)``; otherwise use ``native`` as-is.
-            3. **Fallback default** from ``sampling.max_context_window`` --
-               only used when neither tier 1 nor tier 2 yields a value.
-               Treated as a default, NOT capped by the policy; existing
-               ``settings.json`` files carrying the historical ``32768``
-               default keep working unchanged after upgrade.
-
-        The policy field is intentionally nullable and unset by default so
-        no existing install behavior shifts. Setting it engages
-        ``min(native, policy)`` across every model whose native context is
-        discoverable; per-model overrides remain the operator's escape
-        hatch for individual models that should exceed the policy.
-        """
+        """Context limit in tokens: the per-model override, else the model's
+        native length capped by ``sampling.max_context_window_policy``, else
+        the global default. ``None`` only if no layer sets one."""
         if self.settings.max_context_window is not None:
             return self.settings.max_context_window
+        # Only the discovered length is policy-capped: the override and the
+        # global default are explicit operator choices. Policy <= 0 is unset.
         native = self.model_entry.model_context_length
         policy = self.sampling.max_context_window_policy
         if native is not None and policy is not None and policy > 0:
@@ -138,7 +101,7 @@ class ConfiguredModel:
 
     @property
     def max_tokens(self) -> int | None:
-        """Effective max output tokens."""
+        """Output token limit: the per-model setting, else the global default."""
         return first_present(
             self.settings.max_tokens,
             self.sampling.max_tokens,
@@ -150,8 +113,8 @@ def new_configured_model(
     model_entry: EngineEntry | None = None,
     sampling: SamplingDefaults | None = None,
 ) -> ConfiguredModel:
-    """Build a ConfiguredModel, filling absent layers with defaults."""
-    # Lazy import: SamplingDefaults lives in server.py, which imports us.
+    """Build a ConfiguredModel, filling absent layers with empty defaults."""
+    # Circular at runtime: server.py imports this module.
     from .server import SamplingDefaults
 
     return ConfiguredModel(
