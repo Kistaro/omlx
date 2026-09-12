@@ -87,6 +87,13 @@ final class OMLXClient: ObservableObject {
         try await get("/admin/api/server-info")
     }
 
+    func getUsage(range: String = "today", model: String = "") async throws -> UsageHistoryDTO {
+        try await get(AdminAPI.usage, query: [
+            URLQueryItem(name: "range", value: range),
+            URLQueryItem(name: "model", value: model),
+        ])
+    }
+
     func getStats(scope: String = "session", model: String = "") async throws -> StatsDTO {
         try await get("/admin/api/stats", query: [
             URLQueryItem(name: "scope", value: scope),
@@ -366,7 +373,7 @@ final class OMLXClient: ObservableObject {
         oqLevel: Double,
         preserveMtp: Bool = false
     ) async throws -> OQEstimateResponse {
-        // `oq_level` accepts ints (2,3,4,5,6,8) and 3.5. Send it without a
+        // `oq_level` accepts ints and fractional levels. Send it without a
         // trailing `.0` so the server parses an int when the user picked one.
         let levelStr: String = (oqLevel.rounded() == oqLevel)
             ? String(Int(oqLevel))
@@ -446,6 +453,20 @@ final class OMLXClient: ObservableObject {
         try await postEmpty(AdminAPI.benchCancel(benchId))
     }
 
+    @discardableResult
+    func startANETuning(_ body: ANETuningStartRequest) async throws -> ANETuningStartResponse {
+        try await post(AdminAPI.aneTuneStart, body: body)
+    }
+
+    func getANETuningResults(tuningId: String) async throws -> ANETuningStatusResponse {
+        try await get(AdminAPI.aneTuneResults(tuningId))
+    }
+
+    @discardableResult
+    func cancelANETuning(tuningId: String) async throws -> ANETuningCancelResponse {
+        try await postEmpty(AdminAPI.aneTuneCancel(tuningId))
+    }
+
     // PR 13 — Accuracy bench
 
     @discardableResult
@@ -474,6 +495,22 @@ final class OMLXClient: ObservableObject {
     @discardableResult
     func cancelAccuracyBench() async throws -> SimpleStatusResponse {
         try await postEmpty(AdminAPI.accuracyCancel)
+    }
+
+    // Context bench
+
+    @discardableResult
+    func startContextBench(_ body: ContextBenchStartRequest) async throws -> ContextBenchStartResponse {
+        try await post(AdminAPI.contextBenchStart, body: body)
+    }
+
+    func getContextBenchStatus(benchId: String) async throws -> ContextBenchStatusResponse {
+        try await get(AdminAPI.contextBenchResults(benchId))
+    }
+
+    @discardableResult
+    func cancelContextBench(benchId: String) async throws -> BenchCancelResponse {
+        try await postEmpty(AdminAPI.contextBenchCancel(benchId))
     }
 
     // MARK: - Core request

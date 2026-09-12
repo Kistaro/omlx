@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for ConfiguredModel — the (model, configuration) resolution object.
 
-These pin the two-input resolutions: the *effective* thinking state reported to
-clients (per-model override > template default) and the *override-only* kwargs
-injected into the chat template at inference time (an unset toggle defers to the
-template's own default).
+These pin the layered resolutions: the *effective* thinking state reported to
+clients (per-model override > template default) and the context/token limits
+(per-model override > policy-clamped discovered value > global default).
 """
 
 from dataclasses import dataclass
 
 import pytest
 
-from omlx.configured_model import ConfiguredModel, new_configured_model
+from omlx.configured_model import new_configured_model
 from omlx.engine_pool import EngineEntry
 from omlx.model_settings import ModelSettings
 from omlx.server import SamplingDefaults
@@ -49,6 +48,7 @@ class FakeSampling:
     """Duck-typed stand-in for SamplingDefaults' relevant fields."""
 
     max_context_window: int = 32768
+    max_context_window_policy: int | None = None
     max_tokens: int = 32768
 
 
@@ -88,34 +88,6 @@ class TestPreserveThinking:
             ModelSettings(preserve_thinking=None), FakeEntry(preserve_thinking_default=True)
         )
         assert cm.preserve_thinking is True
-
-
-class TestThinkingTemplateOverrides:
-    """The inference-time contract: inject only explicit toggles, never the
-    template default — so an unset toggle defers to the template."""
-
-    def test_empty_when_no_overrides(self):
-        cm = new_configured_model(ModelSettings(), FakeEntry(thinking_default=True))
-        assert cm.thinking_template_overrides() == {}
-
-    def test_includes_only_set_toggles(self):
-        cm = new_configured_model(ModelSettings(enable_thinking=True))
-        assert cm.thinking_template_overrides() == {"enable_thinking": True}
-
-    def test_includes_both_when_set(self):
-        cm = new_configured_model(ModelSettings(enable_thinking=False, preserve_thinking=True))
-        assert cm.thinking_template_overrides() == {
-            "enable_thinking": False,
-            "preserve_thinking": True,
-        }
-
-    def test_template_default_never_leaks_into_overrides(self):
-        # thinking_default=True must NOT force enable_thinking into the kwargs;
-        # that would change behaviour for models whose template already defaults
-        # on. This is the equivalence that makes the server refactor safe.
-        cm = new_configured_model(ModelSettings(enable_thinking=None), FakeEntry(thinking_default=True))
-        assert cm.thinking_template_overrides() == {}
-        assert cm.enable_thinking is True  # but the *reported* state is still True
 
 
 class TestMaxContextWindow:
@@ -201,6 +173,16 @@ class TestMaxContextWindow:
         )
         assert cm.max_context_window == 32_768
 
+    def test_policy_zero_is_unset(self):
+        # ``0`` is the "no policy" sentinel from settings.json; it must not
+        # clamp the native context to nothing.
+        cm = new_configured_model(
+            ModelSettings(),
+            entry(model_context_length=262_144),
+            SamplingDefaults(max_context_window=32768, max_context_window_policy=0),
+        )
+        assert cm.max_context_window == 262_144
+
     def test_per_model_override_escapes_policy(self):
         # A per-model override is the operator's explicit per-model choice; the
         # policy cap does NOT clamp it. Escape hatch for individual models that
@@ -229,51 +211,6 @@ class TestMaxContextWindow:
             ),
         )
         assert cm.max_context_window == 32_768
-
-
-class TestEmbeddingMaxLength:
-    """embedding_max_length precedence: explicit request length > the resolved
-    context window > ``None`` (let the embedding model resolve its own length)."""
-
-    def test_request_length_wins(self):
-        cm = new_configured_model(
-            ModelSettings(),
-            entry(model_context_length=4096),
-            SamplingDefaults(max_context_window=32768),
-        )
-        assert cm.embedding_max_length(256) == 256
-
-    def test_falls_back_to_context_window(self):
-        # No explicit request length: defer to the model's resolved context.
-        cm = new_configured_model(
-            ModelSettings(),
-            entry(model_context_length=4096),
-            SamplingDefaults(max_context_window=32768),
-        )
-        assert cm.embedding_max_length() == 4096
-
-    def test_respects_policy_cap(self):
-        # The resolved context window already reflects the policy clamp, so the
-        # embedding length inherits it.
-        cm = new_configured_model(
-            ModelSettings(),
-            entry(model_context_length=262_144),
-            SamplingDefaults(
-                max_context_window=32768, max_context_window_policy=128_000
-            ),
-        )
-        assert cm.embedding_max_length() == 128_000
-
-    def test_none_when_no_context_known(self):
-        # Degenerate config: no per-model setting, no native context, and no
-        # sampling default either -> return None so the embedding model resolves
-        # its own configured context length instead of a hard 512 cap (#1687).
-        cm = new_configured_model(
-            ModelSettings(),
-            entry(model_context_length=None),
-            SamplingDefaults(max_context_window=None),
-        )
-        assert cm.embedding_max_length() is None
 
 
 class TestMaxTokens:

@@ -10,21 +10,136 @@ their chain-of-thought reasoning in <think>...</think> tags.
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import List, Optional, Tuple
-
 
 # Tags used for thinking blocks
 _OPEN_TAG = "<think>"
 _CLOSE_TAG = "</think>"
 _OPEN_LEN = len(_OPEN_TAG)   # 7
 _CLOSE_LEN = len(_CLOSE_TAG)  # 8
+_MINIMAX_OPEN_TAG = "<mm:think>"
+_MINIMAX_CLOSE_TAG = "</mm:think>"
+_HY3_OPEN_TAG = "<think:opensource>"
+_HY3_CLOSE_TAG = "</think:opensource>"
 
 # Regex for non-streaming extraction (complete text)
 _THINKING_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 # Handle case where <think> is missing but </think> is present
 # (scheduler prepends <think>\n but the tag may be split)
 _THINKING_TAIL_PATTERN = re.compile(r'^(.*?)</think>', re.DOTALL)
+
+
+def _safe_tokenizer_attr(tokenizer, attr: str, default=None):
+    if tokenizer is None:
+        return default
+    try:
+        return getattr(tokenizer, attr, default)
+    except (AttributeError, TypeError, ValueError):
+        return default
+
+
+def _single_token_id(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _convert_token_to_id(tokenizer, token: str) -> int | None:
+    convert = _safe_tokenizer_attr(tokenizer, "convert_tokens_to_ids")
+    if not callable(convert):
+        return None
+    try:
+        token_id = convert(token)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if token_id == _safe_tokenizer_attr(tokenizer, "unk_token_id"):
+        return None
+    return _single_token_id(token_id)
+
+
+def _encode_prompt_ids(tokenizer, prompt: str) -> list[int] | None:
+    encode = _safe_tokenizer_attr(tokenizer, "encode")
+    if not callable(encode):
+        return None
+    try:
+        return list(encode(prompt, add_special_tokens=False))
+    except TypeError:
+        try:
+            return list(encode(prompt))
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _think_end_token_ids(tokenizer) -> list[int] | None:
+    think_end_id = _single_token_id(_safe_tokenizer_attr(tokenizer, "think_end_id"))
+    if think_end_id is not None:
+        return [think_end_id]
+
+    think_end_tag = _safe_tokenizer_attr(tokenizer, "think_end", _CLOSE_TAG)
+    encoded = _encode_prompt_ids(tokenizer, think_end_tag or _CLOSE_TAG)
+    if encoded:
+        return encoded
+
+    token_id = _convert_token_to_id(tokenizer, _CLOSE_TAG)
+    if token_id is not None:
+        return [token_id]
+    return None
+
+
+def prompt_opens_thinking(
+    tokenizer,
+    prompt: str,
+    prompt_token_ids: Sequence[int] | None = None,
+) -> tuple[bool, str]:
+    """Return whether a raw prompt would make the engine prepend ``<think>``.
+
+    Presentation-layer stripping must mirror the engine/scheduler decision, not
+    just the raw text suffix. Some prompts can contain a literal ``<think>``
+    without tokenizing to the model's think-start id, and templates can leave
+    the think-start token in the final token tail without the raw string ending
+    in the visible tag. When the caller already has prompt ids from the same
+    tokenizer path as the scheduler, those ids are authoritative.
+    """
+    think_tag = (
+        _safe_tokenizer_attr(tokenizer, "think_start", _OPEN_TAG) or _OPEN_TAG
+    )
+    if tokenizer is None:
+        return prompt.rstrip().endswith(think_tag), think_tag
+
+    think_start_id = _single_token_id(
+        _safe_tokenizer_attr(tokenizer, "think_start_id")
+    )
+    if think_start_id is None:
+        think_start_id = _convert_token_to_id(tokenizer, think_tag)
+    if think_start_id is None:
+        return False, think_tag
+
+    if prompt_token_ids is None:
+        prompt_ids = _encode_prompt_ids(tokenizer, prompt)
+    else:
+        prompt_ids = list(prompt_token_ids)
+    if not prompt_ids or not think_start_id:
+        return False, think_tag
+
+    last_tokens = list(prompt_ids[-3:])
+    if think_start_id not in last_tokens:
+        return False, think_tag
+
+    last_idx = len(last_tokens) - 1 - last_tokens[::-1].index(think_start_id)
+    after_start = last_tokens[last_idx + 1 :]
+
+    if after_start:
+        think_end_ids = _think_end_token_ids(tokenizer)
+        if think_end_ids and think_end_ids[0] in after_start:
+            return False, think_tag
+
+    return True, think_tag
 
 
 def extract_thinking(text: str) -> Tuple[str, str]:
@@ -55,6 +170,13 @@ def extract_thinking(text: str) -> Tuple[str, str]:
     """
     if not text:
         return ("", "")
+
+    text = (
+        text.replace(_MINIMAX_OPEN_TAG, _OPEN_TAG)
+        .replace(_MINIMAX_CLOSE_TAG, _CLOSE_TAG)
+        .replace(_HY3_OPEN_TAG, _OPEN_TAG)
+        .replace(_HY3_CLOSE_TAG, _CLOSE_TAG)
+    )
 
     thinking_parts = []
     remaining = text
@@ -156,11 +278,22 @@ class ThinkingParser:
                     i += _OPEN_LEN
                     continue
 
+                if remaining.startswith(_HY3_OPEN_TAG):
+                    self._in_thinking = True
+                    i += len(_HY3_OPEN_TAG)
+                    continue
+
                 # Try to match </think>
                 if remaining.startswith(_CLOSE_TAG):
                     self._in_thinking = False
                     self._close_seen = True
                     i += _CLOSE_LEN
+                    continue
+
+                if remaining.startswith(_HY3_CLOSE_TAG):
+                    self._in_thinking = False
+                    self._close_seen = True
+                    i += len(_HY3_CLOSE_TAG)
                     continue
 
                 # Check if it could be a partial tag (not enough chars yet)
@@ -243,15 +376,14 @@ class ThinkingParser:
         yet a complete match.
         """
         length = len(text)
-        if length >= _CLOSE_LEN:
+        if length >= len(_HY3_CLOSE_TAG):
             # Long enough to determine - not a partial tag
             return False
 
-        # Check against both tags
-        if _OPEN_TAG[:length] == text:
-            return True
-        if _CLOSE_TAG[:length] == text:
-            return True
+        # Check against all recognised tags
+        for tag in (_OPEN_TAG, _CLOSE_TAG, _HY3_OPEN_TAG, _HY3_CLOSE_TAG):
+            if length < len(tag) and tag[:length] == text:
+                return True
 
         return False
 
@@ -424,3 +556,52 @@ class ThinkingBudgetProcessor:
         forced = mx.full(logits.shape, float("-inf"))
         forced[..., target_id] = 0.0
         return forced
+
+    # -- Speculative-decoding (vlm_mtp) support -----------------------------
+    #
+    # The vlm_mtp decode path applies this processor inside mlx-vlm's
+    # speculative verify walk, where positions past the first draft
+    # rejection are discarded and re-sampled on the next round.
+    # ``snapshot_state()`` / ``restore_state()`` let the caller checkpoint
+    # the processor after each position and rewind it when a draft suffix
+    # is rejected, keeping the one-call-per-emitted-token contract intact.
+    # See ``omlx/speculative/processing_sampler.py``.
+
+    _SNAPSHOT_ATTRS = (
+        "_thinking_tokens",
+        "_in_thinking",
+        "_forcing",
+        "_waiting_utf8",
+        "_force_idx",
+        "_done",
+        "_first_call",
+        "_recent_tokens",
+        "_last_token_utf8_complete",
+        "_pending_utf8",
+        "_accepted_up_to",
+    )
+
+    def snapshot_state(self) -> dict:
+        """Checkpoint mutable state for position-keyed rewind (vlm_mtp)."""
+        state: dict = {}
+        for name in self._SNAPSHOT_ATTRS:
+            if not hasattr(self, name):
+                continue
+            value = getattr(self, name)
+            if isinstance(value, list):
+                value = list(value)
+            state[name] = value
+        return state
+
+    def restore_state(self, state: dict) -> None:
+        """Restore a checkpoint produced by :meth:`snapshot_state`."""
+        for name in self._SNAPSHOT_ATTRS:
+            if name in state:
+                value = state[name]
+                if isinstance(value, list):
+                    value = list(value)
+                setattr(self, name, value)
+            elif name == "_accepted_up_to" and hasattr(self, name):
+                # Lazily-created attr absent from the snapshot: drop it so
+                # the next __call__ re-baselines from the history it sees.
+                delattr(self, name)

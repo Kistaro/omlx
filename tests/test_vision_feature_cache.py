@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for VisionFeatureSSDCache (memory LRU + SSD persistence)."""
 
-import shutil
-import tempfile
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import mlx.core as mx
 import pytest
 
+import omlx.cache.vision_feature_cache as vfc_mod
 from omlx.cache.vision_feature_cache import (
     VisionFeatureSSDCache,
-    VisionFeatureSSDEntry,
     _composite_hash,
     _composite_key,
 )
@@ -128,6 +125,18 @@ class TestMemoryCache:
         assert stats["hits"] == 1
         assert stats["misses"] == 1
 
+    def test_close_clears_memory_lru(self):
+        cache = VisionFeatureSSDCache(cache_dir=None, max_memory_entries=3)
+        cache.put("img", "model", mx.ones((2, 2)))
+
+        with cache._memory_lock:
+            assert cache._memory_cache
+
+        cache.close()
+
+        with cache._memory_lock:
+            assert cache._memory_cache == {}
+
 
 class TestSSDCache:
     def test_ssd_write_and_load(self, ssd_cache):
@@ -156,6 +165,27 @@ class TestSSDCache:
         # Check safetensors file exists
         safetensors_files = list(tmp_cache_dir.rglob("*.safetensors"))
         assert len(safetensors_files) == 1
+
+    def test_ssd_write_fsyncs_parent_dir_after_rename(self, ssd_cache, tmp_cache_dir):
+        """The background writer must fsync the containing directory after
+        renaming the temp file into place, same as the paged SSD cache
+        writers. Data fsync already happens inside _write_safetensors_no_mx."""
+        calls = []
+        real = vfc_mod._fsync_parent_dir
+
+        def spy(path):
+            calls.append(str(path))
+            return real(path)
+
+        with patch.object(vfc_mod, "_fsync_parent_dir", spy):
+            features = mx.ones((4, 8))
+            mx.eval(features)
+            ssd_cache.put("img_hash", "model_a", features)
+            time.sleep(0.5)
+
+        safetensors_files = list(tmp_cache_dir.rglob("*.safetensors"))
+        assert len(safetensors_files) == 1
+        assert calls == [str(safetensors_files[0])]
 
     def test_ssd_startup_scan(self, tmp_cache_dir):
         # Phase 1: create cache and store features
@@ -290,6 +320,36 @@ class TestVLMEngineIntegration:
         engine._vlm_model.encode_image.assert_called_once_with(
             pixel_values, image_position_ids=image_position_ids
         )
+
+    def test_compute_vision_features_encode_image_with_grid_thw(self):
+        """MiniMax-style encode_image should receive image_grid_thw."""
+        from omlx.engine.vlm import VLMBatchedEngine
+
+        expected = mx.ones((10, 16))
+
+        class GridModel:
+            config = SimpleNamespace(model_type="minimax_m3_vl")
+
+            def __init__(self):
+                self.calls = []
+
+            def encode_image(self, pixel_values, image_grid_thw=None):
+                self.calls.append((pixel_values, image_grid_thw))
+                if image_grid_thw is None:
+                    raise ValueError("image_grid_thw required")
+                return expected
+
+        engine = VLMBatchedEngine.__new__(VLMBatchedEngine)
+        engine._vlm_model = GridModel()
+
+        pixel_values = mx.zeros((1, 3, 224, 224))
+        image_grid_thw = mx.array([[1, 4, 4]])
+        result = engine._compute_vision_features(
+            pixel_values, {"image_grid_thw": image_grid_thw}
+        )
+
+        assert result is expected
+        assert engine._vlm_model.calls == [(pixel_values, image_grid_thw)]
 
     def test_compute_vision_features_encode_image_without_position_support(self):
         """Models with a pixel-only encode_image signature should still work."""

@@ -1,3 +1,9 @@
+import os
+
+# MLX 0.32.2 runs fp32 GPU matmuls at TF32 precision on M5-class tensor units;
+# the fp32 parity tests assert 2e-5, which TF32 cannot hold. Test session only.
+os.environ.setdefault("MLX_ENABLE_TF32", "0")
+
 # SPDX-License-Identifier: Apache-2.0
 """
 Pytest configuration and fixtures for oMLX tests.
@@ -17,6 +23,13 @@ import pytest
 # import-time torch references so the package can load.
 from omlx._torch_stub import install as _install_torch_stub
 _install_torch_stub()
+
+# Run tests under the same M5 sorted gather_qmm reroute the server
+# installs at model load (issue #2267). Without it, kernel-sensitive
+# tests (e.g. the SwitchGLU fusion bit-exactness test, whose inter=32
+# down_proj runs at K=32) fail on M5 hardware. No-op elsewhere.
+from omlx.patches.m5_gather_qmm import apply_m5_gather_qmm_workaround
+apply_m5_gather_qmm_workaround()
 
 from omlx.request import Request, SamplingParams
 
@@ -104,6 +117,18 @@ class MockModel:
         """Return model parameters."""
         return self._parameters
 
+    def make_cache(self) -> list:
+        """Build the per-layer prompt cache, like a real mlx-lm model.
+
+        The scheduler probes this to decide whether a stored prefix can be
+        rebuilt faithfully, so the double has to answer it. A plain llama-style
+        model builds ``KVCache`` layers; tests that need another cache class
+        override this attribute.
+        """
+        from mlx_lm.models.cache import KVCache
+
+        return [KVCache() for _ in range(self.config.num_hidden_layers)]
+
 
 @pytest.fixture
 def mock_tokenizer() -> MockTokenizer:
@@ -177,3 +202,18 @@ def real_model_dir() -> Path:
     and should be marked with @pytest.mark.slow.
     """
     return Path.home() / "Workspace" / "models"
+
+
+@pytest.fixture(autouse=True)
+def _reset_decode_activity_registry():
+    """Keep the process-global decode-activity registry hermetic per test.
+
+    Schedulers publish to it from step(); entries live for a short TTL, so
+    without this a scheduler stepped in one test reads as cross-engine
+    decode contention in the next.
+    """
+    from omlx.decode_activity import get_decode_activity
+
+    get_decode_activity().clear()
+    yield
+    get_decode_activity().clear()

@@ -44,11 +44,24 @@ def unwrap_tokenizer(tokenizer):
     return tokenizer
 
 
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def resolve_vocab_size(model: Any) -> int | None:
     """Extract vocab_size from a model's config/args, handling nested configs.
 
-    Tries ``model.config.vocab_size``, then ``model.args.vocab_size``,
-    then ``text_config.vocab_size`` for VLM composite models (e.g. Qwen3.5).
+    For a composite (VLM) config the nested ``text_config.vocab_size`` wins
+    over the top-level ``vocab_size``: the language model's embedding and
+    ``lm_head`` are sized from the text config, while the top-level field
+    is often a dataclass placeholder that the checkpoint's ``config.json``
+    never sets (mlx-vlm's Qwen3-VL ``ModelConfig`` defaults it to 32000
+    against a 151936-token text vocabulary). Sizing the grammar bitmask
+    from that placeholder misaligns the mask with the logits, and every
+    sampled token is rejected until ``max_tokens`` (#3550). Falls back to
+    ``model.config.vocab_size`` / ``model.args.vocab_size`` for plain LLMs.
 
     Args:
         model: An MLX model object (LLM, VLM, or any object with config/args).
@@ -62,15 +75,17 @@ def resolve_vocab_size(model: Any) -> int | None:
         config = getattr(model, attr, None)
         if config is None:
             continue
-        vs = getattr(config, "vocab_size", None)
-        if isinstance(vs, int):
-            return vs
         text_cfg = getattr(config, "text_config", None)
         if isinstance(text_cfg, dict):
-            vs = text_cfg.get("vocab_size")
+            nested = _positive_int(text_cfg.get("vocab_size"))
         elif text_cfg is not None:
-            vs = getattr(text_cfg, "vocab_size", None)
-        if isinstance(vs, int):
+            nested = _positive_int(getattr(text_cfg, "vocab_size", None))
+        else:
+            nested = None
+        if nested is not None:
+            return nested
+        vs = _positive_int(getattr(config, "vocab_size", None))
+        if vs is not None:
             return vs
     return None
 
@@ -120,7 +135,9 @@ def is_gemma4_model(model_name: str, config: dict[str, Any] | None = None) -> bo
     """
     if config is not None:
         model_type = config.get("model_type", "")
-        if model_type in {"gemma4", "gemma4_unified"}:
+        # diffusion_gemma shares Gemma 4's wire protocol (channel markers,
+        # call:name{...} tool calls), so it uses the same parser/extractor.
+        if model_type in {"gemma4", "gemma4_unified", "diffusion_gemma"}:
             logger.debug(f"Gemma 4 model detected via config.model_type: {model_name}")
             return True
 
@@ -191,6 +208,129 @@ def _find_tokenizer_json(
 
 
 @lru_cache(maxsize=128)
+def _is_misconverted_unlimited_ocr_tokenizer(tokenizer_file: str) -> bool:
+    """Detect Unlimited-OCR exports re-saved through LlamaTokenizer.
+
+    Some converted checkpoints retain Unlimited-OCR's byte-level BPE
+    vocabulary but replace its pre-tokenizer and decoder with Llama's
+    Metaspace/SentencePiece pipeline.  The resulting tokenizer emits literal
+    GPT-2 byte glyphs (``Ġ``, ``Ċ``) and mojibake for UTF-8 text.
+    """
+    tokenizer_path = Path(tokenizer_file)
+    config = _read_json_file(tokenizer_path.parent / "config.json")
+    if config is None:
+        return False
+    model_type = str(config.get("model_type") or "").lower().replace("_", "-")
+    if model_type != "unlimited-ocr":
+        return False
+
+    tokenizer_content = _read_json_file(tokenizer_path)
+    if tokenizer_content is None:
+        return False
+
+    pre_tokenizer = tokenizer_content.get("pre_tokenizer")
+    decoder = tokenizer_content.get("decoder")
+    model = tokenizer_content.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    decoder_steps = decoder.get("decoders") if isinstance(decoder, dict) else None
+    replace_step = decoder_steps[0] if isinstance(decoder_steps, list) else None
+    return (
+        isinstance(pre_tokenizer, dict)
+        and pre_tokenizer.get("type") == "Metaspace"
+        and pre_tokenizer.get("replacement") == "▁"
+        and pre_tokenizer.get("split") is False
+        and isinstance(decoder, dict)
+        and decoder.get("type") == "Sequence"
+        and isinstance(decoder_steps, list)
+        and len(decoder_steps) >= 3
+        and isinstance(replace_step, dict)
+        and isinstance(decoder_steps[1], dict)
+        and isinstance(decoder_steps[2], dict)
+        and replace_step.get("type") == "Replace"
+        and replace_step.get("pattern") == {"String": "▁"}
+        and replace_step.get("content") == " "
+        and decoder_steps[1].get("type") == "ByteFallback"
+        and decoder_steps[2].get("type") == "Fuse"
+        and isinstance(model, dict)
+        and model.get("type") == "BPE"
+        and model.get("fuse_unk") is True
+        and model.get("byte_fallback") is True
+        and isinstance(vocab, dict)
+        and "Ġ" in vocab
+        and "Ċ" in vocab
+    )
+
+
+def _tokenizer_backend(tokenizer: Any) -> Any | None:
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        return backend
+
+    inner = getattr(tokenizer, "_tokenizer", None)
+    if inner is None:
+        return None
+    return getattr(inner, "backend_tokenizer", inner)
+
+
+def repair_misconverted_unlimited_ocr_tokenizer(
+    tokenizer: Any,
+    model_path: str | Path | None = None,
+) -> bool:
+    """Restore Unlimited-OCR's byte-level tokenizer pipeline in memory.
+
+    Returns ``True`` only when the known misconverted checkpoint signature was
+    detected and repaired.  Canonical Unlimited-OCR checkpoints and unrelated
+    tokenizer families are left untouched.
+    """
+    tokenizer_file = _find_tokenizer_json(tokenizer, model_path)
+    if tokenizer_file is None or not _is_misconverted_unlimited_ocr_tokenizer(
+        str(tokenizer_file)
+    ):
+        return False
+
+    backend = _tokenizer_backend(tokenizer)
+    if backend is None:
+        raise RuntimeError(
+            "Cannot repair the misconverted Unlimited-OCR tokenizer: "
+            "no tokenizers backend is available."
+        )
+
+    from tokenizers import Regex, decoders, normalizers, pre_tokenizers
+
+    # Match baidu/Unlimited-OCR's canonical tokenizer.json exactly.  The
+    # converted model keeps the original vocab and merges; only these runtime
+    # pipeline components and BPE flags were rewritten by LlamaTokenizer.
+    backend.model.fuse_unk = False
+    backend.model.byte_fallback = False
+    backend.normalizer = normalizers.Sequence([])
+    backend.pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Split(
+                Regex(r"\p{N}{1,3}"), behavior="isolated", invert=False
+            ),
+            pre_tokenizers.Split(
+                Regex(r"[一-龥぀-ゟ゠-ヿ]+"),
+                behavior="isolated",
+                invert=False,
+            ),
+            pre_tokenizers.Split(
+                Regex(
+                    r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+"
+                    r"|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+"
+                    r"| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+"
+                    r"|\s+(?!\S)|\s+"
+                ),
+                behavior="isolated",
+                invert=False,
+            ),
+            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+        ]
+    )
+    backend.decoder = decoders.ByteLevel()
+    return True
+
+
+@lru_cache(maxsize=128)
 def _detokenizer_factory_from_tokenizer_json(
     tokenizer_file: str,
 ) -> Callable[[Any], Any] | None:
@@ -217,6 +357,36 @@ def _detokenizer_factory_from_tokenizer_json(
     if _is_bpe_decoder(decoder):
         return BPEStreamingDetokenizer
     return None
+
+
+def _is_unsafe_mlx_vlm_bpe_detokenizer(detokenizer: Any) -> bool:
+    detokenizer_type = type(detokenizer)
+    return (
+        detokenizer_type.__module__ == "mlx_vlm.tokenizer_utils"
+        and detokenizer_type.__name__ == "BPEStreamingDetokenizer"
+    )
+
+
+def _create_decoder_aware_detokenizer(
+    tokenizer: Any,
+    tokenizer_file: Path | None,
+) -> Any | None:
+    if tokenizer_file is None:
+        return None
+
+    factory = _detokenizer_factory_from_tokenizer_json(str(tokenizer_file))
+    if factory is None:
+        return None
+
+    try:
+        return factory(tokenizer)
+    except Exception as exc:
+        logger.debug(
+            "Failed to create decoder-aware detokenizer from %s: %s",
+            tokenizer_file,
+            exc,
+        )
+        return None
 
 
 class _CompatNaiveStreamingDetokenizer:
@@ -277,6 +447,22 @@ def create_streaming_detokenizer(
     raw VLM/DFlash tokenizers may not.  In that case, mirror mlx-lm's
     tokenizer.json decoder detection before falling back to the naive decoder.
     """
+    tokenizer_file = _find_tokenizer_json(tokenizer, model_path)
+    if tokenizer_file is not None and _is_misconverted_unlimited_ocr_tokenizer(
+        str(tokenizer_file)
+    ):
+        # The file incorrectly declares an SPM decoder even though its vocab
+        # contains byte-level BPE tokens.  Always create a fresh request-local
+        # BPE detokenizer so concurrent streams cannot share mutable state.
+        try:
+            from mlx_lm.tokenizer_utils import BPEStreamingDetokenizer
+
+            return BPEStreamingDetokenizer(tokenizer)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to create a byte-level Unlimited-OCR detokenizer."
+            ) from exc
+
     has_existing_attr = True
     try:
         detokenizer = tokenizer.detokenizer
@@ -289,20 +475,25 @@ def create_streaming_detokenizer(
         logger.debug("Failed to read tokenizer.detokenizer: %s", exc)
 
     if detokenizer is not None:
+        if _is_unsafe_mlx_vlm_bpe_detokenizer(detokenizer):
+            decoder_aware_detokenizer = _create_decoder_aware_detokenizer(
+                tokenizer,
+                tokenizer_file,
+            )
+            if decoder_aware_detokenizer is not None:
+                return decoder_aware_detokenizer
+            logger.debug(
+                "Using existing mlx-vlm BPE detokenizer because no "
+                "decoder-aware replacement is available"
+            )
         return detokenizer
 
-    tokenizer_file = _find_tokenizer_json(tokenizer, model_path)
-    if tokenizer_file is not None:
-        factory = _detokenizer_factory_from_tokenizer_json(str(tokenizer_file))
-        if factory is not None:
-            try:
-                return factory(tokenizer)
-            except Exception as exc:
-                logger.debug(
-                    "Failed to create decoder-aware detokenizer from %s: %s",
-                    tokenizer_file,
-                    exc,
-                )
+    decoder_aware_detokenizer = _create_decoder_aware_detokenizer(
+        tokenizer,
+        tokenizer_file,
+    )
+    if decoder_aware_detokenizer is not None:
+        return decoder_aware_detokenizer
 
     if has_existing_attr:
         return None
@@ -354,6 +545,36 @@ def _is_lfm2_text_lm(model_name: str) -> bool:
     )
 
 
+def _is_laguna_model(model_name: str) -> bool:
+    """Return True only for a local checkpoint declaring ``model_type: laguna``."""
+    config = _read_json_file(Path(model_name) / "config.json")
+    return config is not None and config.get("model_type") == "laguna"
+
+
+def _is_k2_horizon_model(model_name: str) -> bool:
+    """Return True only for a local checkpoint declaring ``model_type: k2_horizon``."""
+    config = _read_json_file(Path(model_name) / "config.json")
+    return config is not None and config.get("model_type") == "k2_horizon"
+
+
+def _is_mistral_common_model(model_name: str) -> bool:
+    """True for local model dirs transformers would route to MistralCommonBackend.
+
+    transformers keys that routing on ``tekken.json`` (its
+    ``_has_tekken_tokenizer_file`` check), so mirror the same trigger here.
+    The ``tokenizer.json`` requirement guards the fallback target: audio-only
+    mistral exports (Voxtral) ship ``tekken.json`` without an HF-native
+    ``tokenizer.json``, and for those there is no TokenizersBackend to select.
+    """
+    try:
+        model_path = Path(model_name)
+        return (model_path / "tekken.json").is_file() and (
+            model_path / "tokenizer.json"
+        ).is_file()
+    except OSError:
+        return False
+
+
 def get_tokenizer_config(
     model_name: str,
     trust_remote_code: bool = False,
@@ -381,6 +602,42 @@ def get_tokenizer_config(
     if _is_lfm2_text_lm(model_name):
         config.setdefault("tool_parser_type", "pythonic")
         logger.debug("LFM2 text LM detected: setting tool_parser_type to pythonic")
+
+    if _is_laguna_model(model_name):
+        # Laguna's Mistral-derived tokenizer ships the legacy regex that
+        # Transformers identifies as tokenization-incorrect without this flag.
+        config["fix_mistral_regex"] = True
+        # mlx-lm's template sniffing sees Laguna's <arg_key> markers and picks
+        # the glm47 parser; pin the vendored Laguna parser instead.
+        config.setdefault("tool_parser_type", "laguna")
+        logger.debug(
+            "Laguna detected: enabling the Mistral tokenizer regex fix and "
+            "the laguna tool parser"
+        )
+
+    if _is_k2_horizon_model(model_name):
+        # Register IFM markers that mlx-lm's parser detection does not recognize.
+        config.setdefault("tool_parser_type", "k2_horizon")
+        logger.debug("K2 Horizon detected: setting tool_parser_type to k2_horizon")
+
+    if _is_mistral_common_model(model_name):
+        # MistralCommonBackend renders chat templates whose output cannot be
+        # re-encoded faithfully: encoding the rendered string turns control
+        # tokens ([INST], [AVAILABLE_TOOLS], [TOOL_CALLS], ...) into literal
+        # text tokens, corrupting every prompt built through the
+        # render-then-encode pipeline (empty replies / prompt echo / dead tool
+        # calling on Devstral 2 and Mistral Small). Passing fix_mistral_regex
+        # makes AutoTokenizer select the HF-native TokenizersBackend instead —
+        # honoring the backend the repo itself declares — and enables the
+        # Tekken pre-tokenizer regex fix where transformers' own config
+        # detection applies. AutoTokenizer's routing
+        # gate for this kwarg shipped in transformers 5.12.1 (the pyproject
+        # floor); older 5.x swallows it and keeps the broken backend.
+        config.setdefault("fix_mistral_regex", True)
+        logger.debug(
+            "mistral-common model detected: forcing HF-native tokenizer "
+            "backend via fix_mistral_regex"
+        )
 
     return config
 

@@ -18,12 +18,28 @@ from omlx.engine_core import get_mlx_executor
 
 _preflight_logger = logging.getLogger("omlx.engine.preflight")
 
+_PREFLIGHT_CLEANUP_WAIT_TIMEOUT_S = 4.0
+_PREFLIGHT_CLEANUP_POLL_INTERVAL_S = 0.05
+
 # Per-process record of (engine_class_name, method) pairs that have
 # already logged a "scheduler unreachable" warning. The warning marks a
 # wrapper-chain misconfiguration — a deployment bug rather than a
 # runtime condition — so once-per-pair is enough to alert oncall
 # without flooding the journal at request rate.
 _PREFLIGHT_UNREACHABLE_WARNED: set[tuple[str, str]] = set()
+
+
+def _clear_teardown_references(
+    engine: object,
+    *,
+    none_attrs: tuple[str, ...],
+    false_attrs: tuple[str, ...] = (),
+) -> None:
+    """Clear wrapper-side references in a consistent stop() teardown pass."""
+    for attr in none_attrs:
+        setattr(engine, attr, None)
+    for attr in false_attrs:
+        setattr(engine, attr, False)
 
 
 def _warn_scheduler_unreachable_once(
@@ -48,6 +64,100 @@ def _warn_scheduler_unreachable_once(
     )
 
 
+async def _run_scheduler_preflight_with_cleanup_retry(
+    scheduler: Any,
+    *,
+    num_prompt_tokens: int,
+    request_id: str | None,
+    eviction_callback: Any | None,
+    executor: Any | None = None,
+    text_only: bool = False,
+) -> None:
+    """Run route preflight after transient post-request cleanup settles.
+
+    A finished request can remain resident while its asynchronous cache store
+    owns the extracted KV and while the scheduler's deferred Metal clear is
+    pending. Charging a new request against that temporary footprint produces
+    a false rejection. Only defer a preflight that would otherwise need
+    eviction or rejection; requests that already fit keep the fast path.
+
+    Cleanup remains owned by ``Scheduler.step()``. This helper never drains
+    request state, synchronizes a stream, or clears the Metal pool, so active
+    batched work is not interrupted.
+    """
+    deadline = time.monotonic() + _PREFLIGHT_CLEANUP_WAIT_TIMEOUT_S
+    waited_for_cleanup = False
+
+    while True:
+        eviction_request = scheduler.preflight_eviction_request(
+            num_prompt_tokens=num_prompt_tokens,
+            request_id=request_id,
+            text_only=text_only,
+        )
+        if eviction_request is None:
+            scheduler.preflight_or_raise(
+                num_prompt_tokens=num_prompt_tokens,
+                request_id=request_id,
+                text_only=text_only,
+            )
+            return
+
+        cleanup_pending_fn = getattr(
+            scheduler, "has_pending_route_preflight_cleanup", None
+        )
+        cleanup_pending = (
+            cleanup_pending_fn() is True if callable(cleanup_pending_fn) else False
+        )
+        now = time.monotonic()
+        if cleanup_pending and now < deadline:
+            if not waited_for_cleanup:
+                waited_for_cleanup = True
+                _preflight_logger.debug(
+                    "Deferring preflight rejection for request %s until "
+                    "post-request cache cleanup settles",
+                    request_id or "preflight",
+                )
+            await asyncio.sleep(_PREFLIGHT_CLEANUP_POLL_INTERVAL_S)
+            continue
+
+        # Dropping the last Request/KV references and clearing MLX's pool do
+        # not make macOS phys_footprint settle atomically. Once a transient
+        # rejection has observed pending cleanup, keep re-measuring for the
+        # same bounded window even after the scheduler bookkeeping is clear.
+        # This also avoids evicting an idle model for bytes that IOKit is
+        # already returning asynchronously.
+        if waited_for_cleanup and now < deadline:
+            refresh_usage = getattr(
+                scheduler, "refresh_route_preflight_usage", None
+            )
+            if executor is not None and callable(refresh_usage):
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(executor, refresh_usage)
+            await asyncio.sleep(_PREFLIGHT_CLEANUP_POLL_INTERVAL_S)
+            continue
+
+        if cleanup_pending and waited_for_cleanup:
+            _preflight_logger.warning(
+                "Post-request cache cleanup did not settle within %.1fs before "
+                "preflight for request %s; using the current memory snapshot",
+                _PREFLIGHT_CLEANUP_WAIT_TIMEOUT_S,
+                request_id or "preflight",
+            )
+
+        if eviction_callback is not None:
+            _preflight_logger.info(
+                "Running preflight LRU eviction for request %s",
+                eviction_request.request_id,
+            )
+            await eviction_callback(eviction_request)
+        scheduler.preflight_or_raise(
+            num_prompt_tokens=num_prompt_tokens,
+            request_id=request_id,
+            text_only=text_only,
+        )
+        return
+
+
 @dataclass
 class GenerationOutput:
     """
@@ -55,6 +165,7 @@ class GenerationOutput:
 
     Compatible with both simple and batched engines.
     """
+
     text: str
     tokens: List[int] = field(default_factory=list)
     prompt_tokens: int = 0
@@ -67,6 +178,23 @@ class GenerationOutput:
     tool_calls: Optional[List[Dict[str, Any]]] = None
     # Prefix cache stats
     cached_tokens: int = 0
+    # Optional engine-native throughput stats. Diffusion models report
+    # generation after prefill separately from end-to-end request time.
+    prompt_tps: float = 0.0
+    generation_tps: float = 0.0
+    diffusion_canvas_tokens: int = 0
+    diffusion_denoising_steps: int = 0
+    diffusion_work_tokens: int = 0
+    diffusion_canvas_tps: float = 0.0
+    diffusion_work_tps: float = 0.0
+    generated_at: Optional[float] = None
+    generated_until: Optional[float] = None
+    first_token_at: Optional[float] = None
+    # Internal scheduler trace populated only by local benchmark requests.
+    benchmark_prefill_chunks: List[int] = field(default_factory=list)
+    benchmark_requested_steps: List[int] = field(default_factory=list)
+    benchmark_boundary_enabled: bool = False
+    benchmark_cache_block_size: int = 0
 
 
 class BaseEngine(ABC):
@@ -76,6 +204,18 @@ class BaseEngine(ABC):
     Both SimpleEngine and BatchedEngine implement this interface,
     allowing the server to use either without code changes.
     """
+
+    @property
+    def supports_early_tool_call_streaming(self) -> bool:
+        """Whether Chat may parse raw tool envelopes before engine finish.
+
+        Default-false by design. An engine may opt in only when its underlying
+        producer cannot also return authoritative structured ``tool_calls`` for
+        the same stream; otherwise the API layer cannot safely emit before the
+        terminal output arrives.
+        """
+
+        return False
 
     @property
     @abstractmethod
@@ -102,7 +242,7 @@ class BaseEngine(ABC):
     @abstractmethod
     async def generate(
         self,
-        prompt: str,
+        prompt: str | list[int],
         max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -117,7 +257,7 @@ class BaseEngine(ABC):
         Generate a complete response (non-streaming).
 
         Args:
-            prompt: Input text
+            prompt: Input text or token IDs
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Top-p sampling
@@ -134,7 +274,7 @@ class BaseEngine(ABC):
     @abstractmethod
     async def stream_generate(
         self,
-        prompt: str,
+        prompt: str | list[int],
         max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -149,7 +289,7 @@ class BaseEngine(ABC):
         Stream generation token by token.
 
         Args:
-            prompt: Input text
+            prompt: Input text or token IDs
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Top-p sampling
@@ -315,14 +455,17 @@ class BaseEngine(ABC):
         return None
 
 
-class BaseNonStreamingEngine(ABC):
-    """Base class for non-streaming engines (embedding, reranker).
+class ActivityTrackingMixin:
+    """In-flight operation tracking for admin visibility.
 
-    These engines compute outputs in a single forward pass and don't
-    support streaming or chat completion interfaces.
+    Engines that don't run requests through a Scheduler (non-streaming
+    engines, DFlashEngine) have no scheduler snapshot for the admin
+    Active Models card to read, so they track their own operations here
+    and expose them via get_activity_snapshot().
     """
 
     def __init__(self):
+        super().__init__()
         self._active_count = 0
         self._active_lock = threading.Lock()
         self._activities: Dict[str, Dict[str, Any]] = {}
@@ -453,6 +596,14 @@ class BaseNonStreamingEngine(ABC):
                 "active_requests": self._active_count,
                 "activities": activities,
             }
+
+
+class BaseNonStreamingEngine(ActivityTrackingMixin, ABC):
+    """Base class for non-streaming engines (embedding, reranker).
+
+    These engines compute outputs in a single forward pass and don't
+    support streaming or chat completion interfaces.
+    """
 
     @property
     @abstractmethod

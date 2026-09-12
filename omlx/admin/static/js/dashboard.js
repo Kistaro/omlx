@@ -5,17 +5,112 @@
     const DSA_MODEL_TYPES = new Set([
         'deepseek_v32', 'glm_moe_dsa',
     ]);
-    const DASHBOARD_MAIN_TABS = new Set(['status', 'settings', 'models', 'logs', 'bench']);
+    const DIFFUSION_CONFIG_MODEL_TYPES = new Set([
+        'diffusion_gemma',
+    ]);
+    const DIFFUSION_UNSUPPORTED_PROFILE_FIELDS = new Set([
+        'top_p',
+        'top_k',
+        'min_p',
+        'repetition_penalty',
+        'presence_penalty',
+        'force_sampling',
+        'enable_thinking',
+        'preserve_thinking',
+        'thinking_budget_enabled',
+        'thinking_budget_tokens',
+        'reasoning_parser',
+        'guided_grammar_enabled',
+        'guided_grammar',
+        'max_tool_result_tokens',
+        'index_cache_freq',
+        'turboquant_kv_enabled',
+        'turboquant_kv_bits',
+        'turboquant_skip_last',
+        'qwen35_ane_prefill_enabled',
+        'qwen35_ane_prefill_sequence_length',
+        'qwen35_ane_prefill_tail_padding_min_tokens',
+        'qwen35_ane_prefill_fraction',
+        'qwen35_ane_prefill_fused_down',
+        'qwen35_ane_prefill_max_layers',
+        'qwen35_ane_prefill_dual_ane',
+        'qwen35_ane_prefill_gdn',
+        'qwen35_ane_prefill_gdn_fraction',
+        'qwen35_ane_prefill_gdn_max_layers',
+        'qwen35_ane_prefill_cpu_enabled',
+        'qwen35_ane_prefill_cpu_fraction',
+        'qwen35_ane_prefill_cpu_down_fraction',
+        'qwen35_ane_prefill_cpu_gdn_fraction',
+        'qwen35_ane_prefill_cpu_threads',
+        'qwen35_ane_prefill_cpu_shared_resource',
+        'moe_expert_offload_enabled',
+        'moe_expert_offload_resident_fraction',
+        'qwen35_oq_a8_enabled',
+        'qwen35_oq_a8_min_tokens',
+        'specprefill_enabled',
+        'specprefill_draft_model',
+        'specprefill_keep_pct',
+        'specprefill_threshold',
+        'dflash_enabled',
+        'dflash_draft_model',
+        'dflash_draft_quant_enabled',
+        'dflash_draft_quant_weight_bits',
+        'dflash_draft_quant_activation_bits',
+        'dflash_draft_quant_group_size',
+        'dflash_max_ctx',
+        'dflash_in_memory_cache',
+        'dflash_in_memory_cache_max_entries',
+        'dflash_in_memory_cache_max_bytes',
+        'dflash_ssd_cache',
+        'dflash_ssd_cache_max_bytes',
+        'dflash_draft_window_size',
+        'dflash_draft_sink_size',
+        'dflash_block_size',
+        'dflash_verify_mode',
+        'mtp_enabled',
+        'qwen35_ane_prefill_shared_fraction',
+        'vlm_mtp_enabled',
+        'vlm_mtp_draft_model',
+        'vlm_mtp_draft_block_size',
+    ]);
+    const DIFFUSION_UNSUPPORTED_CT_KWARGS = new Set([
+        'enable_thinking',
+        'reasoning_effort',
+        'preserve_thinking',
+    ]);
+    const REASONING_EFFORT_PRESETS = new Set([
+        'low', 'medium', 'high', 'xhigh', 'max',
+    ]);
+    const VLM_MTP_DRAFTER_CONFIG_MODEL_TYPES = new Set([
+        'gemma4_assistant',
+        'gemma4_unified_assistant',
+        'qwen3_5_mtp',
+    ]);
+    // DFlash drafters that carry no "dflash" name token. Meta ships the Muse
+    // Glimmer DFlash drafter as "-assistant", which oMLX's name heuristics
+    // would otherwise route to the MTP/spec-prefill buckets.
+    const DFLASH_DRAFTER_CONFIG_MODEL_TYPES = new Set([
+        'muse_glimmer_assistant',
+    ]);
+    const DASHBOARD_MAIN_TABS = new Set(['status', 'cluster', 'settings', 'models', 'logs', 'bench']);
     const DASHBOARD_SETTINGS_TABS = new Set(['global', 'integrations', 'models']);
     const DASHBOARD_MODELS_TABS = new Set(['manager', 'downloader', 'quantizer', 'uploader']);
-    const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy']);
+    const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy', 'context']);
+    const THEME_STORAGE_KEY = 'omlx-chat-theme';
+    const ENHANCED_READABILITY_KEY = 'omlx-enhanced-readability';
+
+    // Default sort for the settings and manager model tables. Also the target
+    // state for the "reset sort" action.
+    const MODELS_SORT_DEFAULT = { by: 'id', order: 'asc' };
+    const MANAGER_SORT_DEFAULT = { by: 'name', order: 'asc' };
 
     function dashboard() {
         return {
             // Theme
-            theme: localStorage.getItem('omlx-chat-theme') || 'auto',
+            theme: localStorage.getItem(THEME_STORAGE_KEY) || 'auto',
             activeTheme: 'light', // Will be updated by applyTheme
             systemThemeListener: null,
+            enhancedReadability: localStorage.getItem(ENHANCED_READABILITY_KEY) === 'on',
 
             // Mobile menu
             mobileMenuOpen: false,
@@ -30,17 +125,18 @@
             // Global settings
             globalSettings: {
                 base_path: '',
-                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk', burst_decode_mode: 'balanced' },
-                model: { model_dirs: [''] },
+                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk', burst_decode_mode: 'balanced', preserve_mid_system_cache: true, distributed_inference_enabled: false, distributed_inference_active: false, max_audio_upload_size: '100MB' },
+                model: { model_dirs: [''], model_fallback: false, hide_helper_models: false },
                 memory: { prefill_memory_guard: true, memory_guard_tier: 'balanced', memory_guard_custom_ceiling_gb: 0 },
-                scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false },
-                cache: { enabled: true, ssd_cache_dir: '', ssd_cache_max_size: 'auto', hot_cache_max_size: '0', initial_cache_blocks: 256, hot_cache_only: false },
+                scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false, prefill_priority: 'context', decode_fairness: true },
+                cache: { enabled: true, ssd_cache_dir: '', ssd_cache_max_size: 'auto', hot_cache_max_size: '0', hot_cache_write_through: false, ane_compile_cache: false, initial_cache_blocks: 256, hot_cache_only: false, gdn_snapshot_storage: 'auto', gdn_ssd_split_enabled: true, gdn_ssd_pending_max_size: '512MB', gdn_sidecar_precision: 'fp32' },
                 sampling: { max_context_window: 32768, max_context_window_policy: null, max_tokens: 32768, temperature: 1.0, top_p: 0.95, top_k: 0, repetition_penalty: 1.0 },
-                mcp: { config_path: '' },
+                mcp: { config_path: '', expose_tools: true },
+                usage: { usage_history: true },
                 huggingface: { endpoint: '', hf_cache_enabled: true, hf_cache_path: '' },
                 network: { http_proxy: '', https_proxy: '', no_proxy: '', ca_bundle: '' },
                 auth: { api_key_set: false, api_key: '', skip_api_key_verification: false, sub_keys: [] },
-                claude_code: { context_scaling_enabled: false, target_context_size: 200000, mode: 'cloud', opus_model: null, sonnet_model: null, haiku_model: null },
+                claude_code: { mode: 'cloud', opus_model: null, sonnet_model: null, haiku_model: null },
                 integrations: {
                     copilot_model: null,
                     codex_model: null,
@@ -50,15 +146,28 @@
                     pi_model: null,
                     openclaw_tools_profile: 'full',
                     markitdown_enabled: true,
-                    markitdown_expose_model: true,
+                    markitdown_expose_model: false,
                     markitdown_max_file_size_mb: 25,
                     markitdown_max_files_per_request: 5,
                     markitdown_pdf_processing_engine: 'markitdown',
+                    web_search_provider: 'ddgs',
+                    web_search_brave_api_key: '',
+                    web_search_searxng_url: '',
+                    web_search_ddgs_backends: '',
+                    web_search_max_results: 3,
+                    web_search_content_mode: 'snippet',
+                    web_search_content_truncate: true,
+                    web_search_content_max_chars: 20000,
                 },
                 ui: { language: 'en' },
                 idle_timeout: { idle_timeout_seconds: null },
                 system: { total_memory_bytes: 0, total_memory: '', auto_model_memory: '', ssd_total_bytes: 0, ssd_total: '' },
             },
+
+            // Web search "Test search" button state
+            webSearchTest: { running: false, ok: null, message: '' },
+            // Engines selectable for the DDGS Custom provider (ddgs 9.14.1 text registry)
+            ddgsBackendList: ['brave', 'duckduckgo', 'grokipedia', 'mojeek', 'wikipedia', 'yahoo', 'yandex'],
 
             // Cache slider (0-100%)
             cachePercent: 10,
@@ -75,8 +184,14 @@
             models: [],
             loadingModels: false,
             reloading: false,
-            sortBy: 'id',
-            sortOrder: 'asc',
+            // Sort state persists across refreshes/restarts via localStorage.
+            sortBy: localStorage.getItem('omlx_models_sort_by') || MODELS_SORT_DEFAULT.by,
+            sortOrder: localStorage.getItem('omlx_models_sort_order') || MODELS_SORT_DEFAULT.order,
+            modelSearch: '',
+            // Manager tab (Browse Models > Local) sort + search state.
+            managerSortBy: localStorage.getItem('omlx_manager_sort_by') || MANAGER_SORT_DEFAULT.by,
+            managerSortOrder: localStorage.getItem('omlx_manager_sort_order') || MANAGER_SORT_DEFAULT.order,
+            managerSearch: '',
 
             // Auth UI state
             showApiKey: false,
@@ -112,11 +227,53 @@
                 enableToolResultLimit: false,
                 max_tool_result_tokens: null,
                 ctKwargEntries: [],
+                is_diffusion_model: false,
+                qwen35_ane_prefill_enabled: false,
+                qwen35_ane_prefill_sequence_length: 2048,
+                qwen35_ane_prefill_tail_padding_min_tokens: 0,
+                qwen35_ane_prefill_fraction: 0.53,
+                qwen35_ane_prefill_fused_down: false,
+                qwen35_ane_prefill_max_layers: 64,
+                qwen35_ane_prefill_dual_ane: true,
+                qwen35_ane_prefill_gdn: true,
+                qwen35_ane_prefill_gdn_fraction: 0.5,
+                qwen35_ane_prefill_gdn_max_layers: 48,
+                qwen35_ane_prefill_cpu_enabled: false,
+                qwen35_ane_prefill_cpu_fraction: 0.135,
+                qwen35_ane_prefill_cpu_down_fraction: 0,
+                qwen35_ane_prefill_cpu_gdn_fraction: 0,
+                qwen35_ane_prefill_cpu_threads: 8,
+                qwen35_ane_prefill_cpu_shared_resource: true,
+                moe_expert_offload_enabled: false,
+                moe_expert_offload_resident_fraction: 0.25,
+                qwen35_oq_a8_enabled: false,
+                qwen35_oq_a8_min_tokens: 128,
                 trust_remote_code: false,
             },
             savingModelSettings: false,
+            importingMtplx: false,
             loadingGenDefaults: false,
             reasoningParsers: [],
+            aneTuning: {
+                tuningId: null,
+                modelId: null,
+                running: false,
+                cancelling: false,
+                applying: false,
+                applied: false,
+                total: 0,
+                status: null,
+                error: '',
+            },
+            aneTuningOverrides: {
+                allowCpu: true,
+                allowCpuGate: true,
+                allowCpuDown: true,
+                allowAneGdn: true,
+                allowCpuGdn: true,
+                allowCpuSharedResource: true,
+            },
+            _aneTuningPollTimer: null,
 
             // Profile / template / preset state
             profiles: [],                // per-model profiles for selectedModel
@@ -130,7 +287,7 @@
             _applySeq: 0,               // monotonic counter for apply race guard
             profileError: '',
             showNewProfileForm: false,
-            newProfile: { name: '', display_name: '', description: '', also_as_template: false },
+            newProfile: { display_name: '', api_name: '', api_name_touched: false, description: '', also_as_template: false },
             showNewTemplateForm: false,
             newTemplate: { name: '', display_name: '', description: '' },
             editingProfile: null,        // profile name being edited inline
@@ -249,6 +406,7 @@
             hfModelsLoaded: false,
             hfError: '',
             hfSuccess: '',
+            hfTokenInvalid: false,
             _hfRefreshTimer: null,
             hfDeleteConfirm: null,
 
@@ -347,6 +505,11 @@
             oqDtype: 'bfloat16',
             oqSensitivityModelPath: '',
             oqPreserveMtp: false,
+            oqMtpAssistantPath: '',
+            oqEnhanced: false,
+            oqeReuseImatrixCache: true,
+            oqeImatrixCachePath: '',
+            oqeStrictImatrix: false,
 
             // oQ Uploader state
             uploadHfToken: localStorage.getItem('omlx-hf-upload-token') || '',
@@ -374,8 +537,21 @@
 
             // Benchmark state
             benchModelId: '',
+            benchContextProfile: 'code_python',
+            benchAlignPromptToAne: false,
             benchPromptLengths: { 1024: true, 4096: true, 8192: false, 16384: false, 32768: false, 65536: false, 131072: false, 200000: false },
             benchBatchSizes: { 2: true, 4: true, 8: false },
+            benchForceLmEngine: false,
+            benchAdvancedOptionsOpen: false,
+            benchExternalEnabled: false,
+            // Shared external endpoint settings (persisted in localStorage,
+            // used by both the throughput and accuracy bench tabs)
+            externalBaseUrl: localStorage.getItem('omlx_bench_external_base_url') || '',
+            externalApiKey: localStorage.getItem('omlx_bench_external_api_key') || '',
+            externalModel: localStorage.getItem('omlx_bench_external_model') || '',
+            // { base_url, model } snapshot of the current run when external
+            // (no API key — used for the text export header)
+            benchRunExternal: null,
             benchRunning: false,
             benchBenchId: null,
             benchProgress: null,
@@ -391,7 +567,8 @@
             benchUploadResults: [],
             benchUploadDone: null,
             benchUploading: false,
-            benchUploadSkipped: null,  // { features: [...] } when upload was skipped due to experimental features
+            benchUploadSkipped: null,  // { reason } — only external-endpoint runs skip now
+            benchUploadFlags: [],      // [{key, label}] acceleration active during the run
             // { bench_id, model_id } when the server reports a running bench
             // that is NOT the one this tab is displaying. Drives the "another
             // bench is running" banner + disables Start so the user doesn't
@@ -401,6 +578,16 @@
             // Bench sub-tab & dropdown
             benchTab: 'throughput',
             benchDropdown: false,
+
+            // Context benchmark state
+            ctxBenchModelId: '',
+            ctxBenchTarget: 131072,
+            ctxBenchRunning: false,
+            ctxBenchBenchId: null,
+            ctxBenchProgress: null,   // { phase, progress, message }
+            ctxBenchResult: null,
+            ctxBenchError: '',
+            ctxBenchEventSource: null,
 
             // Accuracy benchmark state
             accModelId: '',
@@ -451,6 +638,15 @@
             ],
             accBatchSize: 1,
             accEnableThinking: false,
+            accSamplingProfile: 'deterministic',
+            accAdvancedOptionsOpen: false,
+            accExternalEnabled: false,
+            // Provider-specific JSON is intentionally session-only.
+            accExternalExtraBody: '',
+            // Accuracy-only max_tokens floor; persisted like the shared
+            // endpoint settings because it is a simple number the user sets
+            // once per endpoint (thinking models need a larger budget).
+            accExternalMaxTokens: localStorage.getItem('omlx_acc_external_max_tokens') || '',
             accRunning: false,
             accCurrentModel: '',
             accCurrentBenchId: null,
@@ -483,6 +679,12 @@
                 // Watch for main tab changes to manage refresh timers
                 this.$watch('mainTab', (value) => {
                     this.handleMainTabChange(value);
+                });
+
+                this.$watch('globalSettings.server.host', (value) => {
+                    if (!this.isLoopbackBindHost(value)) {
+                        this.globalSettings.auth.skip_api_key_verification = false;
+                    }
                 });
 
                 // When the user returns to this browser tab after looking
@@ -576,6 +778,7 @@
                     if (!this.benchDeviceInfo) await this.loadBenchDeviceInfo();
                     await this.loadBenchState();
                     await this.loadAccState();
+                    await this.loadCtxBenchState();
                 }
             },
 
@@ -620,6 +823,7 @@
 
             setMainTab(tab) {
                 if (!DASHBOARD_MAIN_TABS.has(tab)) return;
+                if (tab === 'cluster' && !this.globalSettings.server.distributed_inference_active) return;
                 this.mainTab = tab;
                 this.syncTabStateToUrl();
             },
@@ -645,7 +849,7 @@
                 }
             },
 
-            async checkForUpdate() {
+           async checkForUpdate() {
                 try {
                     const resp = await fetch('/admin/api/update-check');
                     if (resp.ok) {
@@ -690,6 +894,7 @@
                             cache: { ...this.globalSettings.cache, ...data.cache },
                             sampling: { ...this.globalSettings.sampling, ...data.sampling },
                             mcp: { ...this.globalSettings.mcp, ...data.mcp },
+                            usage: { ...this.globalSettings.usage, ...data.usage },
                             huggingface: { ...this.globalSettings.huggingface, ...data.huggingface },
                             network: { ...this.globalSettings.network, ...data.network },
                             auth: { ...this.globalSettings.auth, ...data.auth },
@@ -699,6 +904,13 @@
                             system: { ...this.globalSettings.system, ...data.system },
                         };
                         this.globalSettings.ui = data.ui || { language: 'en' };
+                        if (
+                            !this.globalSettings.server.distributed_inference_active
+                            && this.mainTab === 'cluster'
+                        ) {
+                            this.mainTab = 'status';
+                            this.syncTabStateToUrl();
+                        }
 
                         // Sync idle timeout select value
                         this.idleTimeoutValue = this.globalSettings.idle_timeout?.idle_timeout_seconds != null
@@ -735,6 +947,35 @@
                 }
             },
 
+            isLoopbackBindHost(value) {
+                const hosts = String(value || '')
+                    .split(',')
+                    .map(host => host.trim().toLowerCase())
+                    .filter(Boolean);
+                if (hosts.length === 0) return false;
+                return hosts.every(host => {
+                    if (host.replace(/\.+$/, '') === 'localhost') return true;
+                    if (!host.includes(':')) {
+                        const parts = host.split('.');
+                        return parts.length === 4 && parts[0] === '127'
+                            && parts.every(part => /^(0|[1-9]\d{0,2})$/.test(part)
+                                && Number(part) <= 255);
+                    }
+                    // Normalize IPv6, including expanded and IPv4-mapped forms.
+                    // A scope ID does not change whether an address is loopback.
+                    const [address, scope, extra] = host.split('%');
+                    if (extra !== undefined || scope === '') return false;
+                    if (!/^[0-9a-f:.]+$/.test(address)) return false;
+                    try {
+                        const normalized = new URL(`http://[${address}]/`).hostname;
+                        return normalized === '[::1]'
+                            || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(normalized);
+                    } catch {
+                        return false;
+                    }
+                });
+            },
+
             async saveGlobalSettings() {
                 this.saving = true;
                 this.saveSuccess = false;
@@ -745,17 +986,30 @@
                 const s = this.globalSettings;
                 if (!s.server.host) errors.push('Host');
                 if (!s.server.port) errors.push('Port');
+                if (!s.server.max_audio_upload_size) errors.push('Maximum Audio Upload Size');
                 if (!s.model.model_dirs || !s.model.model_dirs.some(d => d.trim())) errors.push('Model Directory');
                 if (!s.scheduler.max_concurrent_requests) errors.push('Max Concurrent Requests');
                 if (!s.scheduler.embedding_batch_size) errors.push('Embedding Batch Size');
                 if (!s.cache.ssd_cache_max_size) errors.push('Max Cache Size');
                 if (!s.sampling.max_context_window) errors.push('Max Context Window');
                 if (!s.sampling.max_tokens) errors.push('Max Tokens');
+                if (s.cache.gdn_snapshot_storage === 'ssd_sidecar' && s.cache.hot_cache_only) {
+                    errors.push('GDN SSD sidecar requires Hot Cache Only to be disabled');
+                }
 
                 if (errors.length > 0) {
                     this.saveError = window.t('js.error.required_fields').replace('{fields}', errors.join(', '));
                     this.saving = false;
                     return;
+                }
+
+                if (!this.isLoopbackBindHost(s.server.host)) {
+                    s.auth.skip_api_key_verification = false;
+                    if (!s.auth.api_key && !s.auth.api_key_set) {
+                        this.saveError = window.t('js.error.api_key_required_network');
+                        this.saving = false;
+                        return;
+                    }
                 }
 
                 // Validate API key if provided
@@ -782,14 +1036,20 @@
                             log_level: this.globalSettings.server.log_level,
                             sse_keepalive_mode: this.globalSettings.server.sse_keepalive_mode,
                             burst_decode_mode: this.globalSettings.server.burst_decode_mode,
+                            preserve_mid_system_cache: this.globalSettings.server.preserve_mid_system_cache,
+                            distributed_inference_enabled: this.globalSettings.server.distributed_inference_enabled,
+                            max_audio_upload_size: this.globalSettings.server.max_audio_upload_size,
                             model_dirs: this.globalSettings.model.model_dirs.filter(d => d.trim()),
                             model_fallback: this.globalSettings.model.model_fallback,
+                            hide_helper_models: this.globalSettings.model.hide_helper_models,
                             memory_prefill_memory_guard: this.globalSettings.memory.prefill_memory_guard,
                             memory_guard_tier: this.globalSettings.memory.memory_guard_tier,
                             memory_guard_custom_ceiling_gb: this.globalSettings.memory.memory_guard_custom_ceiling_gb,
                             max_concurrent_requests: this.globalSettings.scheduler.max_concurrent_requests,
                             embedding_batch_size: this.globalSettings.scheduler.embedding_batch_size,
                             chunked_prefill: this.globalSettings.scheduler.chunked_prefill,
+                            prefill_priority: this.globalSettings.scheduler.prefill_priority,
+                            decode_fairness: this.globalSettings.scheduler.decode_fairness,
                             cache_enabled: this.globalSettings.cache.enabled,
                             ssd_cache_dir: this.globalSettings.cache.ssd_cache_dir,
                             ssd_cache_max_size: this.globalSettings.cache.ssd_cache_max_size,
@@ -798,6 +1058,11 @@
                             ),
                             initial_cache_blocks: this.globalSettings.cache.initial_cache_blocks,
                             hot_cache_only: this.globalSettings.cache.hot_cache_only,
+                            hot_cache_write_through: this.globalSettings.cache.hot_cache_write_through,
+                            ane_compile_cache: this.globalSettings.cache.ane_compile_cache,
+                            gdn_snapshot_storage: this.globalSettings.cache.gdn_snapshot_storage,
+                            gdn_ssd_pending_max_size: this.globalSettings.cache.gdn_ssd_pending_max_size,
+                            gdn_sidecar_precision: this.globalSettings.cache.gdn_sidecar_precision,
                             sampling_max_context_window: this.globalSettings.sampling.max_context_window,
                             sampling_max_context_window_policy: this.globalSettings.sampling.max_context_window_policy || null,
                             sampling_max_tokens: this.globalSettings.sampling.max_tokens,
@@ -806,6 +1071,8 @@
                             sampling_top_k: this.globalSettings.sampling.top_k,
                             sampling_repetition_penalty: this.globalSettings.sampling.repetition_penalty,
                             mcp_config: this.globalSettings.mcp.config_path,
+                            mcp_expose_tools: this.globalSettings.mcp.expose_tools,
+                            usage_history: this.globalSettings.usage.usage_history,
                             hf_cache_enabled: this.globalSettings.huggingface.hf_cache_enabled,
                             network_http_proxy: this.globalSettings.network.http_proxy,
                             network_https_proxy: this.globalSettings.network.https_proxy,
@@ -950,11 +1217,24 @@
                     });
 
                     if (response.ok) {
-                        if (field === 'is_default' && value === true) {
-                            this.models.forEach(m => { m.is_default = (m.id === modelId); });
+                        if (field === 'is_default') {
+                            if (value === true) {
+                                // Exactly this model is default now; every other
+                                // model's flag clears.
+                                this.models.forEach(m => { m.is_default = (m.id === modelId); });
+                            } else {
+                                const model = this.models.find(m => m.id === modelId);
+                                if (model) model.is_default = false;
+                            }
                         } else if (field === 'is_pinned') {
                             const model = this.models.find(m => m.id === modelId);
                             if (model) model.pinned = value;
+                        } else if (field === 'is_hidden') {
+                            const model = this.models.find(m => m.id === modelId);
+                            if (model) model.is_hidden = value;
+                        } else if (field === 'is_favorite') {
+                            const model = this.models.find(m => m.id === modelId);
+                            if (model) model.is_favorite = value;
                         }
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
@@ -999,8 +1279,9 @@
                         method: 'POST',
                     });
                     if (response.ok) {
+                        const data = await response.json();
                         const model = this.models.find(m => m.id === modelId);
-                        if (model) model.loaded = false;
+                        if (model && data.status === 'ok') model.loaded = false;
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
                     } else {
@@ -1019,11 +1300,20 @@
             formValuesForProfile() {
                 const ms = this.modelSettings;
                 const out = {};
+                const isDiffusion = !!ms.is_diffusion_model;
 
                 for (const k of this.profileFields.universal.concat(this.profileFields.model_specific)) {
+                    if (k === 'enable_thinking' && this.selectedModel?.thinking_forced) continue;
                     if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') continue;  // handle below
+                    if (isDiffusion && this.isDiffusionUnsupportedProfileField(k)) continue;
                     if (k === 'thinking_budget_enabled') {
-                        if (ms.enableThinkingBudget) out.thinking_budget_tokens = ms.thinking_budget_tokens ?? null;
+                        if (ms.enableThinkingBudget) out.thinking_budget_enabled = true;
+                        continue;
+                    }
+                    if (k === 'thinking_budget_tokens') {
+                        if (ms.enableThinkingBudget && ms.thinking_budget_tokens) {
+                            out.thinking_budget_tokens = Number(ms.thinking_budget_tokens);
+                        }
                         continue;
                     }
                     if (k === 'index_cache_freq') {
@@ -1031,7 +1321,9 @@
                         continue;
                     }
                     if (k === 'max_tool_result_tokens') {
-                        if (ms.enableToolResultLimit) out.max_tool_result_tokens = ms.max_tool_result_tokens || null;
+                        if (ms.enableToolResultLimit && ms.max_tool_result_tokens) {
+                            out.max_tool_result_tokens = Number(ms.max_tool_result_tokens);
+                        }
                         continue;
                     }
                     if (k === 'guided_grammar_enabled') {
@@ -1039,14 +1331,16 @@
                         continue;
                     }
                     if (k === 'guided_grammar') {
-                        out.guided_grammar = ms.guided_grammar_enabled
-                            ? ((ms.guided_grammar || '').trim() || null)
-                            : null;
+                        const g = ms.guided_grammar_enabled ? (ms.guided_grammar || '').trim() : '';
+                        if (g) out.guided_grammar = g;
                         continue;
                     }
-                    // Standard field: apply nullish coalescing; coerce string numerics
-                    let v = ms[k] ?? null;
-                    if (typeof v === 'string' && v !== '' && !isNaN(Number(v))) v = Number(v);
+                    // Standard field: omit unset values entirely — the server
+                    // treats absent universal keys as "reset to default" when
+                    // the profile is applied (snapshot semantics).
+                    let v = ms[k];
+                    if (v === undefined || v === null || v === '') continue;
+                    if (typeof v === 'string' && !isNaN(Number(v))) v = Number(v);
                     out[k] = v;
                 }
 
@@ -1055,17 +1349,22 @@
                 const forced = [];
                 for (const e of (ms.ctKwargEntries || [])) {
                     if (e.type === 'enable_thinking') {
+                        if (isDiffusion) continue;
                         ctk.enable_thinking = e.value === 'true';
                         if (e.force) forced.push('enable_thinking');
                     } else if (e.type === 'reasoning_effort') {
-                        ctk.reasoning_effort = e.value;
-                        if (e.force) forced.push('reasoning_effort');
+                        if (isDiffusion) continue;
+                        const rawEffort = e.custom ? e.customValue : e.value;
+                        const effort = this.coerceKwargValue(rawEffort);
+                        if (String(effort).trim() !== '') {
+                            ctk.reasoning_effort = effort;
+                            if (e.force) forced.push('reasoning_effort');
+                        }
                     } else if (e.type === 'custom' && e.key && e.key.trim()) {
-                        let v = e.value;
-                        if (v === 'true') v = true;
-                        else if (v === 'false') v = false;
-                        else if (!isNaN(Number(v)) && String(v).trim() !== '') v = Number(v);
-                        ctk[e.key.trim()] = v;
+                        if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(e.key.trim())) {
+                            continue;
+                        }
+                        ctk[e.key.trim()] = this.coerceKwargValue(e.value);
                         if (e.force) forced.push(e.key.trim());
                     }
                 }
@@ -1121,6 +1420,15 @@
                     if (ok) return p;
                 }
                 return null;
+            },
+            profileTooltip(profile) {
+                const lines = [];
+                if (profile?.expose_as_model && profile.model_id) {
+                    lines.push(profile.model_id);
+                }
+                const description = (profile?.description || '').trim();
+                if (description) lines.push(description);
+                return lines.join('\n');
             },
             async loadProfilesForModel(modelId) {
                 this.profiles = [];
@@ -1224,6 +1532,275 @@
                 this.tip.visible = false;
             },
 
+            isDiffusionModel(model) {
+                const modelType = String(model?.config_model_type || '')
+                    .toLowerCase()
+                    .replace(/-/g, '_');
+                return DIFFUSION_CONFIG_MODEL_TYPES.has(modelType);
+            },
+
+            isDiffusionUnsupportedProfileField(field) {
+                return DIFFUSION_UNSUPPORTED_PROFILE_FIELDS.has(field);
+            },
+
+            isDiffusionUnsupportedCtKwarg(key) {
+                return DIFFUSION_UNSUPPORTED_CT_KWARGS.has(key);
+            },
+
+            draftModelSearchText(model) {
+                return [
+                    model?.id,
+                    model?.name,
+                    model?.model_path,
+                    model?.source_repo_id,
+                    model?.config_model_type,
+                ].filter(Boolean).join(' ').toLowerCase();
+            },
+
+            isDraftModelBaseCandidate(model) {
+                if (!model || model.virtual) return false;
+                if (model.id === this.selectedModel?.id) return false;
+                return model.model_type === 'llm' || model.model_type === 'vlm' || !model.model_type;
+            },
+
+            isDflashDraftModel(model) {
+                const configType = String(model?.config_model_type || '').toLowerCase();
+                if (DFLASH_DRAFTER_CONFIG_MODEL_TYPES.has(configType)) {
+                    return true;
+                }
+                // DFlash 2 checkpoints are versioned ("-DFlash2"), so allow an
+                // optional numeric suffix after the "dflash" token.
+                return /(^|[-_/\s])dflash[0-9]*($|[-_/\s])/i.test(this.draftModelSearchText(model));
+            },
+
+            isVlmMtpDraftModel(model) {
+                const configType = String(model?.config_model_type || '').toLowerCase();
+                if (configType) {
+                    return VLM_MTP_DRAFTER_CONFIG_MODEL_TYPES.has(configType);
+                }
+                return /assistant|(^|[-_/\s])mtp($|[-_/\s])/i.test(this.draftModelSearchText(model));
+            },
+
+            isSpecPrefillDraftModel(model) {
+                return !this.isDflashDraftModel(model)
+                    && !this.isVlmMtpDraftModel(model);
+            },
+
+            draftModelCandidates(filterFn, { fallbackToBase = true } = {}) {
+                const base = (this.models || []).filter((model) => (
+                    this.isDraftModelBaseCandidate(model)
+                ));
+                const filtered = base.filter(filterFn);
+                return (filtered.length > 0 || !fallbackToBase) ? filtered : base;
+            },
+
+            specPrefillDraftModelCandidates() {
+                return this.draftModelCandidates((model) => this.isSpecPrefillDraftModel(model));
+            },
+
+            dflashDraftModelCandidates() {
+                return this.draftModelCandidates((model) => this.isDflashDraftModel(model));
+            },
+
+            aneFractionOptions(current, presets) {
+                const options = (presets || []).map(value => ({value,
+                    label: value.toLocaleString(undefined, {style: 'percent', maximumFractionDigits: 0})}));
+                if (!options.some(option => option.value === current)) {
+                    options.unshift({value: current, label: current.toLocaleString(undefined,
+                        {style: 'percent', maximumFractionDigits: 2})});
+                }
+                return options;
+            },
+
+
+
+            vlmMtpDraftModelCandidates() {
+                return this.draftModelCandidates(
+                    (model) => this.isVlmMtpDraftModel(model),
+                    { fallbackToBase: false },
+                );
+            },
+
+            // Settings that materialize as per-request logits processors,
+            // which the VLM MTP decode path cannot apply (#2399). Mirrors
+            // vlm_mtp_processor_conflicts() in model_settings.py; neutral
+            // values (repetition 1.0, presence 0.0) do not conflict.
+            // Thinking budget is exempt: it is applied on the vlm_mtp path
+            // at verify time (MTPProcessingSampler).
+            vlmMtpProcessorConflict() {
+                const ms = this.modelSettings;
+                if (!ms) return false;
+                const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+                const rep = num(ms.repetition_penalty);
+                const pres = num(ms.presence_penalty);
+                return (rep !== null && rep !== 1.0)
+                    || (pres !== null && pres !== 0.0)
+                    || !!ms.guided_grammar_enabled;
+            },
+
+            // Coerce a raw kwarg string from the panel into its JSON type:
+            // 'true'/'false' -> boolean, finite numeric strings -> number.
+            coerceKwargValue(v) {
+                if (v === 'true') return true;
+                if (v === 'false') return false;
+                if (String(v).trim() !== '') {
+                    const numeric = Number(v);
+                    if (Number.isFinite(numeric)) return numeric;
+                }
+                return v;
+            },
+
+            buildCtKwargEntries(chatTemplateKwargs, forcedCtKwargs, isDiffusion = false) {
+                const ctk = chatTemplateKwargs || {};
+                const forced = new Set(forcedCtKwargs || []);
+                const entries = [];
+                for (const [key, value] of Object.entries(ctk)) {
+                    if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(key)) {
+                        continue;
+                    }
+                    if (key === 'enable_thinking') {
+                        entries.push({
+                            type: 'enable_thinking',
+                            value: String(value),
+                            force: forced.has('enable_thinking'),
+                        });
+                    } else if (key === 'reasoning_effort') {
+                        const isPreset = typeof value === 'string'
+                            && REASONING_EFFORT_PRESETS.has(value);
+                        entries.push({
+                            type: 'reasoning_effort',
+                            value: isPreset ? value : 'low',
+                            custom: !isPreset,
+                            customValue: isPreset ? '' : String(value),
+                            force: forced.has('reasoning_effort'),
+                        });
+                    } else {
+                        entries.push({
+                            type: 'custom',
+                            key,
+                            value: String(value),
+                            force: forced.has(key),
+                        });
+                    }
+                }
+                return entries;
+            },
+
+            buildModelSettingsState(model, settings) {
+                const s = settings || {};
+                const isDiffusion = this.isDiffusionModel(model);
+                const ctKwargEntries = this.buildCtKwargEntries(
+                    s.chat_template_kwargs,
+                    s.forced_ct_kwargs,
+                    isDiffusion,
+                );
+                const isOcr = OCR_CONFIG_MODEL_TYPES.has(model?.config_model_type || '');
+                return {
+                    model_alias: s.model_alias || '',
+                    model_type_override: s.model_type_override || '',
+                    max_context_window: s.max_context_window || null,
+                    max_tokens: s.max_tokens || null,
+                    temperature: isOcr ? 0.0 : (s.temperature ?? null),
+                    top_p: s.top_p ?? null,
+                    top_k: s.top_k ?? null,
+                    repetition_penalty: s.repetition_penalty ?? null,
+                    min_p: s.min_p ?? null,
+                    presence_penalty: s.presence_penalty ?? null,
+                    force_sampling: s.force_sampling || false,
+                    enable_thinking: s.enable_thinking ?? null,
+                    thinking_default: model?.thinking_default ?? null,
+                    qwen4_ple_ssd_offload: model?.qwen4_ple_ssd_offload_forced === true
+                        || s.qwen4_ple_ssd_offload === true,
+                    qwen4_ple_ssd_offload_supported:
+                        model?.qwen4_ple_ssd_offload_supported === true,
+                    qwen4_ple_ssd_offload_forced:
+                        model?.qwen4_ple_ssd_offload_forced === true,
+                    deepseek_v41_ced_prefill_enabled:
+                        s.deepseek_v41_ced_prefill_enabled === true,
+                    deepseek_v41_ced_prefill_supported:
+                        String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_') === 'deepseek_v41',
+                    deepseek_v41_engram_ssd_offload: model?.deepseek_v41_engram_ssd_offload_forced === true
+                        || s.deepseek_v41_engram_ssd_offload === true,
+                    deepseek_v41_engram_ssd_offload_requested:
+                        s.deepseek_v41_engram_ssd_offload === true,
+                    deepseek_v41_engram_ssd_offload_supported:
+                        model?.deepseek_v41_engram_ssd_offload_supported === true,
+                    deepseek_v41_engram_ssd_offload_forced:
+                        model?.deepseek_v41_engram_ssd_offload_forced === true,
+                    enableThinkingBudget: !!(s.thinking_budget_tokens),
+                    thinking_budget_tokens: s.thinking_budget_tokens || null,
+                    guided_grammar_enabled: s.guided_grammar_enabled || false,
+                    guided_grammar: s.guided_grammar || '',
+                    enableToolResultLimit: !!(s.max_tool_result_tokens),
+                    max_tool_result_tokens: s.max_tool_result_tokens || null,
+                    reasoning_parser: s.reasoning_parser || '',
+                    ttl_seconds: s.ttl_seconds ?? null,
+                    enableIndexCache: !!(s.index_cache_freq),
+                    index_cache_freq: s.index_cache_freq || null,
+                    turboquant_kv_enabled: s.turboquant_kv_enabled || false,
+                    turboquant_kv_bits: s.turboquant_kv_bits || 4,
+                    moe_expert_offload_enabled: !isDiffusion && model?.moe_expert_offload_supported === true && !!s.moe_expert_offload_enabled,
+                    moe_expert_offload_resident_fraction: s.moe_expert_offload_resident_fraction ?? 0.25,
+                    qwen35_oq_a8_enabled: s.qwen35_oq_a8_enabled || false,
+                    qwen35_oq_a8_min_tokens: s.qwen35_oq_a8_min_tokens ?? 128,
+                    qwen35_ane_prefill_enabled: s.qwen35_ane_prefill_enabled || false,
+                    qwen35_ane_prefill_sequence_length: s.qwen35_ane_prefill_sequence_length || 2048,
+                    qwen35_ane_prefill_tail_padding_min_tokens: s.qwen35_ane_prefill_tail_padding_min_tokens ?? 0,
+                    qwen35_ane_prefill_fraction: s.qwen35_ane_prefill_fraction ?? model?.ane_prefill_default_fraction ?? 0.53,
+                    qwen35_ane_prefill_fused_down: s.qwen35_ane_prefill_fused_down || false,
+                    qwen35_ane_prefill_max_layers: s.qwen35_ane_prefill_max_layers || 64,
+                    qwen35_ane_prefill_dual_ane: s.qwen35_ane_prefill_dual_ane !== false,
+                    qwen35_ane_prefill_gdn: s.qwen35_ane_prefill_gdn !== false,
+                    qwen35_ane_prefill_gdn_fraction: s.qwen35_ane_prefill_gdn_fraction ?? 0.5,
+                    qwen35_ane_prefill_gdn_max_layers: s.qwen35_ane_prefill_gdn_max_layers ?? 48,
+                    qwen35_ane_prefill_cpu_enabled: s.qwen35_ane_prefill_cpu_enabled || false,
+                    qwen35_ane_prefill_cpu_fraction: s.qwen35_ane_prefill_cpu_fraction ?? 0.135,
+                    qwen35_ane_prefill_cpu_down_fraction: s.qwen35_ane_prefill_cpu_down_fraction ?? 0,
+                    qwen35_ane_prefill_cpu_gdn_fraction: s.qwen35_ane_prefill_cpu_gdn_fraction ?? 0,
+                    qwen35_ane_prefill_cpu_threads: s.qwen35_ane_prefill_cpu_threads ?? 8,
+                    qwen35_ane_prefill_cpu_shared_resource: s.qwen35_ane_prefill_cpu_shared_resource !== false,
+                    specprefill_enabled: s.specprefill_enabled || false,
+                    specprefill_draft_model: s.specprefill_draft_model || '',
+                    specprefill_keep_pct: s.specprefill_keep_pct ? String(s.specprefill_keep_pct) : '0.2',
+                    specprefill_threshold: s.specprefill_threshold || null,
+                    dflash_enabled: s.dflash_enabled || false,
+                    dflash_draft_model: s.dflash_draft_model || '',
+                    dflash_draft_quant_enabled: s.dflash_draft_quant_enabled || false,
+                    dflash_draft_quant_weight_bits: s.dflash_draft_quant_weight_bits || 4,
+                    dflash_draft_quant_activation_bits: s.dflash_draft_quant_activation_bits || 16,
+                    dflash_draft_quant_group_size: s.dflash_draft_quant_group_size || 64,
+                    dflash_max_ctx: s.dflash_max_ctx ?? null,
+                    dflash_in_memory_cache: s.dflash_in_memory_cache !== false,
+                    dflash_in_memory_cache_max_entries: s.dflash_in_memory_cache_max_entries || 4,
+                    dflash_in_memory_cache_max_gib: s.dflash_in_memory_cache_max_bytes
+                        ? Math.round(s.dflash_in_memory_cache_max_bytes / (1024 ** 3))
+                        : 8,
+                    dflash_ssd_cache: s.dflash_ssd_cache || false,
+                    dflash_ssd_cache_max_gib: s.dflash_ssd_cache_max_bytes
+                        ? Math.round(s.dflash_ssd_cache_max_bytes / (1024 ** 3))
+                        : 20,
+                    dflash_draft_window_size: s.dflash_draft_window_size ?? null,
+                    dflash_draft_sink_size: s.dflash_draft_sink_size ?? 0,
+                    dflash_block_size: s.dflash_block_size ?? null,
+                    dflash_verify_mode: s.dflash_verify_mode || 'adaptive',
+                    dflash_compatible: model?.dflash_compatible !== false,
+                    dflash_compatibility_reason: model?.dflash_compatibility_reason || '',
+                    dflash_ssd_cache_available: !!model?.dflash_ssd_cache_available,
+                    mtp_enabled: s.mtp_enabled || false,
+                    mtp_compatible: model?.mtp_compatible === true,
+                    mtp_compatibility_reason: model?.mtp_compatibility_reason || '',
+                    is_paroquant: model?.is_paroquant === true,
+                    paroquant_reason: model?.paroquant_reason || '',
+                    qwen35_ane_prefill_shared_fraction: s.qwen35_ane_prefill_shared_fraction ?? 1,
+                    vlm_mtp_enabled: s.vlm_mtp_enabled || false,
+                    vlm_mtp_draft_model: s.vlm_mtp_draft_model || '',
+                    vlm_mtp_draft_block_size: s.vlm_mtp_draft_block_size ?? null,
+                    ctKwargEntries,
+                    is_diffusion_model: isDiffusion,
+                    trust_remote_code: s.trust_remote_code || false,
+                };
+            },
+
             _resetPresetApplicableFields() {
                 // Reset all fields a preset can touch so switching presets does not leave
                 // stale values. Intentionally does NOT touch model_alias / model_type_override
@@ -1255,7 +1832,14 @@
                 this._resetPresetApplicableFields();
                 const s = preset.settings || {};
                 const ms = this.modelSettings;
+                const isDiffusion = !!ms.is_diffusion_model;
                 for (const k of Object.keys(s)) {
+                    if (isDiffusion
+                        && k !== 'chat_template_kwargs'
+                        && k !== 'forced_ct_kwargs'
+                        && this.isDiffusionUnsupportedProfileField(k)) {
+                        continue;
+                    }
                     if (k === 'thinking_budget_enabled') {
                         ms.enableThinkingBudget = !!s[k];
                     } else if (k === 'max_tool_result_tokens') {
@@ -1266,19 +1850,11 @@
                     } else if (k === 'guided_grammar') {
                         ms.guided_grammar = s[k] || '';
                     } else if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') {
-                        const ctk = s.chat_template_kwargs || {};
-                        const forced = new Set(s.forced_ct_kwargs || []);
-                        const entries = [];
-                        for (const [key, value] of Object.entries(ctk)) {
-                            if (key === 'enable_thinking') {
-                                entries.push({type:'enable_thinking', value:String(value), force:forced.has('enable_thinking')});
-                            } else if (key === 'reasoning_effort') {
-                                entries.push({type:'reasoning_effort', value:String(value), force:forced.has('reasoning_effort')});
-                            } else {
-                                entries.push({type:'custom', key, value:String(value), force:forced.has(key)});
-                            }
-                        }
-                        ms.ctKwargEntries = entries;
+                        ms.ctKwargEntries = this.buildCtKwargEntries(
+                            s.chat_template_kwargs,
+                            s.forced_ct_kwargs,
+                            isDiffusion,
+                        );
                     } else {
                         ms[k] = s[k];
                     }
@@ -1292,21 +1868,44 @@
                 try { localStorage.setItem('omlx_profile_scope', scope); } catch (e) {}
             },
 
+            isValidProfileName(name) {
+                // Mirror of the backend rule (validate_profile_name) and the
+                // Mac app's isValidSlug. api_name is the exposed model ID
+                // suffix (<model>:<api_name>), so it must be a clean slug.
+                return /^[a-z0-9][a-z0-9_-]{0,31}$/.test((name || '').trim());
+            },
+            slugifyProfileApiName(value) {
+                let slug = (value || '')
+                    .normalize('NFKD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_-]+/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^[-_]+|[-_]+$/g, '')
+                    .slice(0, 32)
+                    .replace(/[-_]+$/g, '');
+                return slug || 'profile';
+            },
             async createProfile() {
                 if (!this.selectedModel) return;
                 this.profileError = '';
-                const displayName = this.newProfile.display_name.trim();
+                const displayName = (this.newProfile.display_name || '').trim();
                 if (!displayName) {
                     this.profileError = 'Name required';
                     return;
                 }
-                // Auto-generate short unique slug (matches backend ^[a-z0-9][a-z0-9_-]{0,31}$)
+                const apiName = (this.newProfile.api_name || this.slugifyProfileApiName(displayName)).trim();
+                if (!this.isValidProfileName(apiName)) {
+                    this.profileError = window.t('modal.model_settings.profiles.invalid_name');
+                    return;
+                }
                 const autoId = 'p-' + Date.now().toString(36) + '-' +
                                Math.random().toString(36).slice(2, 6);
                 const body = {
                     name: autoId,
                     display_name: displayName,
-                    description: this.newProfile.description.trim() || null,
+                    api_name: apiName,
+                    description: (this.newProfile.description || '').trim() || null,
                     settings: this.formValuesForProfile(),
                     also_save_as_template: false,
                 };
@@ -1320,7 +1919,7 @@
                         await this.loadProfilesForModel(this.selectedModel.id);
                         if (body.also_save_as_template) await this.loadTemplates();
                         this.showNewProfileForm = false;
-                        this.newProfile = { name: '', display_name: '', description: '', also_as_template: false };
+                        this.newProfile = { display_name: '', api_name: '', api_name_touched: false, description: '', also_as_template: false };
                     } else if (r.status === 401) {
                         window.location.href = '/admin';
                     } else {
@@ -1332,44 +1931,8 @@
                 }
             },
             async applyProfileToForm(profile) {
-                // Merge all profile fields into the form (no server call — user clicks Save to persist).
-                const s = profile.settings || {};
-                const ms = this.modelSettings;
-                for (const k of this.profileFields.universal.concat(this.profileFields.model_specific)) {
-                    if (!(k in s)) continue;
-                    if (k === 'thinking_budget_enabled') {
-                        ms.enableThinkingBudget = !!s[k];
-                    } else if (k === 'index_cache_freq') {
-                        ms.enableIndexCache = !!s[k];
-                        ms.index_cache_freq = s[k] || null;
-                    } else if (k === 'max_tool_result_tokens') {
-                        ms.enableToolResultLimit = !!s[k];
-                        ms.max_tool_result_tokens = s[k] || null;
-                    } else if (k === 'guided_grammar_enabled') {
-                        ms.guided_grammar_enabled = !!s[k];
-                    } else if (k === 'guided_grammar') {
-                        ms.guided_grammar = s[k] || '';
-                    } else if (k === 'chat_template_kwargs' || k === 'forced_ct_kwargs') {
-                        // Rebuild ctKwargEntries
-                        const ctk = s.chat_template_kwargs || {};
-                        const forced = new Set(s.forced_ct_kwargs || []);
-                        const entries = [];
-                        for (const [key, value] of Object.entries(ctk)) {
-                            if (key === 'enable_thinking') {
-                                entries.push({type:'enable_thinking', value:String(value), force:forced.has('enable_thinking')});
-                            } else if (key === 'reasoning_effort') {
-                                entries.push({type:'reasoning_effort', value:String(value), force:forced.has('reasoning_effort')});
-                            } else {
-                                entries.push({type:'custom', key, value:String(value), force:forced.has(key)});
-                            }
-                        }
-                        ms.ctKwargEntries = entries;
-                    } else {
-                        ms[k] = s[k];
-                    }
-                }
-                // Persist active_profile_name to backend before updating UI state
                 const seq = ++this._applySeq;
+                this.profileError = '';
                 try {
                     const r = await fetch(
                         `/admin/api/models/${encodeURIComponent(this.selectedModel.id)}/profiles/${encodeURIComponent(profile.name)}/apply`,
@@ -1377,15 +1940,32 @@
                     );
                     if (seq !== this._applySeq) return;  // superseded by a newer click
                     if (r.ok) {
-                        this.activeProfileName = profile.name;
+                        const data = await r.json();
+                        const activeName = data.settings?.active_profile_name || profile.name;
+                        const settings = {
+                            ...(data.settings || {}),
+                            active_profile_name: activeName,
+                        };
+                        this.modelSettings = this.buildModelSettingsState(
+                            this.selectedModel,
+                            settings,
+                        );
+                        if (this.selectedModel) {
+                            this.selectedModel.settings = { ...settings };
+                        }
+                        this.activeProfileName = activeName;
                         this.profilesDrift = false;
                         // Update the models list so the profile badge reflects the change
                         const m = this.models.find(m => m.id === this.selectedModel.id);
-                        if (m) m.settings = { ...m.settings, active_profile_name: profile.name };
+                        if (m) m.settings = { ...settings };
                     } else if (r.status === 401) {
                         window.location.href = '/admin';
+                    } else {
+                        const data = await r.json().catch(() => ({}));
+                        this.profileError = data.detail || 'Failed to apply profile';
                     }
                 } catch (e) {
+                    this.profileError = String(e);
                     console.error('Failed to apply profile:', e);
                 }
             },
@@ -1394,13 +1974,20 @@
                 const existingProfile = this.profiles.find(p => p.name === template.name);
 
                 if (existingProfile) {
-                    // Profile exists, just apply it (preserve user customizations)
-                    await this.applyProfileToForm(existingProfile);
+                    // Global templates are the source of truth in this scope.
+                    const updatedProfile = await this.updateProfile(existingProfile.name, {
+                        settings: template.settings,
+                        source_template: template.name,
+                    });
+                    if (updatedProfile) {
+                        await this.applyProfileToForm(updatedProfile);
+                    }
                 } else {
                     // Create a new profile from the template
                     const body = {
                         name: template.name,
                         display_name: template.display_name,
+                        api_name: this.slugifyProfileApiName(template.display_name || template.name),
                         description: template.description || null,
                         settings: template.settings,
                         source_template: template.name,
@@ -1445,8 +2032,37 @@
                     this.profileDeleteConfirm = null;
                 }
             },
+            updateProfileFromEdit(p) {
+                // Edit-dialog save. Internal profile name stays stable; api_name
+                // is the API-visible suffix used by exposed model IDs.
+                this.profileError = '';
+                const displayName = (p._editDisplayName ?? p.display_name ?? p.name).trim();
+                const apiName = (p._editApiName ?? p.api_name ?? p.name).trim();
+                const description = (p._editDescription ?? p.description ?? '').trim();
+                const exposeAsModel = !!(p._editExposeAsModel ?? p.expose_as_model);
+                if (!displayName) {
+                    this.profileError = 'Name required';
+                    return;
+                }
+                if (!this.isValidProfileName(apiName)) {
+                    this.profileError = window.t('modal.model_settings.profiles.invalid_name');
+                    return;
+                }
+                const patch = {
+                    display_name: displayName,
+                    api_name: apiName,
+                    description: description,
+                    expose_as_model: exposeAsModel,
+                };
+                return this.updateProfile(p.name, patch);
+            },
+            updateProfileSettingsFromForm(p) {
+                return this.updateProfile(p.name, {
+                    settings: this.formValuesForProfile(),
+                });
+            },
             async updateProfile(name, patch) {
-                // patch: { new_name?, display_name?, description?, settings?, also_save_as_template? }
+                // patch: { new_name?, display_name?, api_name?, description?, expose_as_model?, settings?, also_save_as_template? }
                 if (!this.selectedModel) return;
                 this.profileError = '';
                 try {
@@ -1549,6 +2165,269 @@
                 }
             },
 
+            aneTuningForSelectedModel() {
+                return !!this.selectedModel
+                    && this.aneTuning.modelId === this.selectedModel.id;
+            },
+
+            aneTuningProgressPercent() {
+                const current = Number(this.aneTuning.status?.current || 0);
+                const total = Number(
+                    this.aneTuning.status?.total || this.aneTuning.total || 0
+                );
+                if (total <= 0) return 0;
+                return Math.max(0, Math.min(100, current / total * 100));
+            },
+
+            aneTuningRecommendationText() {
+                const recommendation = this.aneTuning.status?.recommendation;
+                if (!recommendation) return '';
+                const measured = recommendation.processing_tps !== null
+                    && recommendation.processing_tps !== undefined;
+                const speed = Number(recommendation.processing_tps || 0).toFixed(1);
+                const speedSuffix = measured
+                    ? ` · ${speed} prompt tok/s`
+                    : '';
+                if (!recommendation.enabled) {
+                    return `Winner: GPU only${speedSuffix}`;
+                }
+                if (recommendation.backend === 'k2') {
+                    return `Winner: ANE dense ${Math.round(recommendation.mlp_fraction * 100)}% · shared expert ${Math.round(recommendation.shared_fraction * 100)}%${speedSuffix}`;
+                }
+                const parts = [
+                    `${recommendation.fused_down ? 'Fused MLP per ANE' : 'MLP'} ${Math.round(Number(recommendation.mlp_fraction) * 100)}%`,
+                ];
+                if (recommendation.gdn_enabled) {
+                    parts.push(
+                        `GDN ${Math.round(Number(recommendation.gdn_fraction) * 100)}%`
+                    );
+                } else {
+                    parts.push('GDN off');
+                }
+                if (recommendation.cpu_enabled) {
+                    parts.push(
+                        `CPU gate ${Math.round(Number(recommendation.cpu_fraction || 0) * 100)}%`,
+                        `CPU down ${Math.round(Number(recommendation.cpu_down_fraction || 0) * 100)}%`,
+                        `CPU GDN ${Math.round(Number(recommendation.cpu_gdn_fraction || 0) * 100)}%`,
+                    );
+                }
+                if (Number(recommendation.tail_padding_min_tokens || 0) > 0) {
+                    parts.push(
+                        `Pad tails ≥${Number(recommendation.tail_padding_min_tokens)}`
+                    );
+                }
+                return `Winner: ${parts.join(' · ')}${speedSuffix}`;
+            },
+
+            _scheduleANETuningPoll() {
+                if (this._aneTuningPollTimer) {
+                    clearTimeout(this._aneTuningPollTimer);
+                }
+                if (!this.aneTuning.running) return;
+                this._aneTuningPollTimer = setTimeout(
+                    () => this.pollANETuning(),
+                    1000,
+                );
+            },
+
+            async startANETuning() {
+                if (!this.selectedModel || this.aneTuning.running) return;
+                const modelId = this.selectedModel.id;
+                if (this._aneTuningPollTimer) {
+                    clearTimeout(this._aneTuningPollTimer);
+                    this._aneTuningPollTimer = null;
+                }
+                this.aneTuning = {
+                    tuningId: null,
+                    modelId,
+                    running: true,
+                    cancelling: false,
+                    applying: false,
+                    applied: false,
+                    total: 0,
+                    status: null,
+                    error: '',
+                };
+                try {
+                    const response = await fetch('/admin/api/bench/ane-tune/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model_id: modelId,
+                            sequence_length: parseInt(
+                                this.modelSettings.qwen35_ane_prefill_sequence_length
+                            ) || 2048,
+                            repeats: 2,
+                            allow_cpu: this.aneTuningOverrides.allowCpu,
+                            allow_cpu_gate: this.aneTuningOverrides.allowCpu
+                                && this.aneTuningOverrides.allowCpuGate,
+                            allow_cpu_down: this.aneTuningOverrides.allowCpu
+                                && this.aneTuningOverrides.allowCpuDown,
+                            allow_ane_gdn: this.aneTuningOverrides.allowAneGdn,
+                            allow_cpu_gdn: this.aneTuningOverrides.allowCpu
+                                && this.aneTuningOverrides.allowAneGdn
+                                && this.aneTuningOverrides.allowCpuGdn,
+                            allow_cpu_shared_resource: this.aneTuningOverrides.allowCpu
+                                && this.aneTuningOverrides.allowCpuSharedResource,
+                        }),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (response.status === 401) {
+                        window.location.href = '/admin';
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'Failed to start ANE tuning.');
+                    }
+                    this.aneTuning.tuningId = data.tuning_id;
+                    this.aneTuning.total = Number(data.total || 0);
+                    await this.pollANETuning();
+                } catch (error) {
+                    this.aneTuning.running = false;
+                    this.aneTuning.error = error.message || String(error);
+                }
+            },
+
+            async pollANETuning() {
+                const tuningId = this.aneTuning.tuningId;
+                if (!tuningId || !this.aneTuning.running) return;
+                try {
+                    const response = await fetch(
+                        `/admin/api/bench/ane-tune/${encodeURIComponent(tuningId)}/results`
+                    );
+                    const data = await response.json().catch(() => ({}));
+                    if (response.status === 401) {
+                        window.location.href = '/admin';
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'Failed to read ANE tuning progress.');
+                    }
+                    if (this.aneTuning.tuningId !== tuningId) return;
+                    if (!data.termination_reason && data.status === 'error') {
+                        data.termination_reason = data.error || data.message || 'ANE tuning failed.';
+                    }
+                    this.aneTuning.status = data;
+                    this.aneTuning.total = Number(data.total || this.aneTuning.total || 0);
+                    this.aneTuning.running = data.status === 'running';
+                    this.aneTuning.cancelling = false;
+                    if (data.status === 'error' || data.status === 'cancelled') {
+                        // Early termination belongs beside the partial result
+                        // matrix. Keep this field for request/transport errors.
+                        this.aneTuning.error = '';
+                    }
+                    this._scheduleANETuningPoll();
+                } catch (error) {
+                    this.aneTuning.running = false;
+                    this.aneTuning.cancelling = false;
+                    this.aneTuning.error = error.message || String(error);
+                }
+            },
+
+            async cancelANETuning() {
+                const tuningId = this.aneTuning.tuningId;
+                if (!tuningId || !this.aneTuning.running || this.aneTuning.cancelling) return;
+                this.aneTuning.cancelling = true;
+                try {
+                    const response = await fetch(
+                        `/admin/api/bench/ane-tune/${encodeURIComponent(tuningId)}/cancel`,
+                        { method: 'POST' },
+                    );
+                    const data = await response.json().catch(() => ({}));
+                    if (response.status === 401) {
+                        window.location.href = '/admin';
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'Failed to cancel ANE tuning.');
+                    }
+                    await this.pollANETuning();
+                } catch (error) {
+                    this.aneTuning.cancelling = false;
+                    this.aneTuning.error = error.message || String(error);
+                }
+            },
+
+            async applyANETuningRecommendation() {
+                if (!this.selectedModel || !this.aneTuningForSelectedModel()) return;
+                const recommendation = this.aneTuning.status?.recommendation;
+                if (!recommendation || this.aneTuning.applying) return;
+                const patch = {
+                    qwen35_ane_prefill_enabled: !!recommendation.enabled,
+                    qwen35_ane_prefill_sequence_length: Number(recommendation.sequence_length),
+                };
+                if (recommendation.enabled) {
+                    patch.qwen35_ane_prefill_fraction = Number(recommendation.mlp_fraction);
+                }
+                if (recommendation.backend === 'k2') {
+                    if (recommendation.enabled) {
+                        patch.qwen35_ane_prefill_shared_fraction = Number(recommendation.shared_fraction);
+                    }
+                } else {
+                    patch.qwen35_ane_prefill_tail_padding_min_tokens = Number(recommendation.tail_padding_min_tokens || 0);
+                    if (recommendation.enabled) {
+                        patch.qwen35_ane_prefill_fused_down = !!recommendation.fused_down;
+                        patch.qwen35_ane_prefill_gdn = !!recommendation.gdn_enabled;
+                        if (recommendation.gdn_enabled) {
+                            patch.qwen35_ane_prefill_gdn_fraction = Number(
+                                recommendation.gdn_fraction
+                            );
+                        }
+                        patch.qwen35_ane_prefill_cpu_enabled = !!recommendation.cpu_enabled;
+                        patch.qwen35_ane_prefill_cpu_fraction = Number(
+                            recommendation.cpu_fraction || 0
+                        );
+                        patch.qwen35_ane_prefill_cpu_down_fraction = Number(
+                            recommendation.cpu_down_fraction || 0
+                        );
+                        patch.qwen35_ane_prefill_cpu_gdn_fraction = Number(
+                            recommendation.cpu_gdn_fraction || 0
+                        );
+                        if (recommendation.cpu_threads !== null
+                            && recommendation.cpu_threads !== undefined) {
+                            patch.qwen35_ane_prefill_cpu_threads = Number(
+                                recommendation.cpu_threads
+                            );
+                        }
+                        if (recommendation.cpu_shared_resource !== null
+                            && recommendation.cpu_shared_resource !== undefined) {
+                            patch.qwen35_ane_prefill_cpu_shared_resource =
+                                !!recommendation.cpu_shared_resource;
+                        }
+                    }
+                }
+                this.aneTuning.applying = true;
+                this.aneTuning.error = '';
+                try {
+                    const response = await fetch(
+                        `/admin/api/models/${encodeURIComponent(this.selectedModel.id)}/settings`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(patch),
+                        },
+                    );
+                    const data = await response.json().catch(() => ({}));
+                    if (response.status === 401) {
+                        window.location.href = '/admin';
+                        return;
+                    }
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'Failed to apply ANE tuning result.');
+                    }
+                    Object.assign(this.modelSettings, patch);
+                    const model = this.models.find(item => item.id === this.selectedModel.id);
+                    if (model && data.settings) {
+                        model.settings = { ...data.settings };
+                    }
+                    this.aneTuning.applied = true;
+                } catch (error) {
+                    this.aneTuning.error = error.message || String(error);
+                } finally {
+                    this.aneTuning.applying = false;
+                }
+            },
+
             async openModelSettings(model) {
                 this.profileError = '';
                 this.showNewProfileForm = false;
@@ -1557,110 +2436,182 @@
                 this.editingTemplate = null;
                 this.profileDeleteConfirm = null;
                 this.templateDeleteConfirm = null;
-                this.activeProfileName = (model.settings && model.settings.active_profile_name) || null;
-                try {
-                    const saved = localStorage.getItem('omlx_profile_scope');
-                    if (saved === 'preset' || saved === 'global' || saved === 'model') {
-                        this.profileScope = saved;
-                    }
-                } catch (e) {}
-                await Promise.all([
-                    this.loadProfilesForModel(model.id),
-                    this.loadTemplates(),
-                ]);
-                this.computeDrift();
-                if (this.reasoningParsers.length === 0) {
+                const isDiffusion = this.isDiffusionModel(model);
+                this.activeProfileName = isDiffusion
+                    ? null
+                    : ((model.settings && model.settings.active_profile_name) || null);
+                if (isDiffusion) {
+                    this.profiles = [];
+                    this.templates = [];
+                    this.profilesDrift = false;
+                } else {
                     try {
-                        const resp = await fetch('/admin/api/grammar/parsers');
-                        if (resp.ok) this.reasoningParsers = await resp.json();
-                        else if (resp.status === 401) window.location.href = '/admin';
-                    } catch (_) { /* network error */ }
+                        const saved = localStorage.getItem('omlx_profile_scope');
+                        if (saved === 'preset' || saved === 'global' || saved === 'model') {
+                            this.profileScope = saved;
+                        }
+                    } catch (e) {}
+                    await Promise.all([
+                        this.loadProfilesForModel(model.id),
+                        this.loadTemplates(),
+                    ]);
+                    if (this.reasoningParsers.length === 0) {
+                        try {
+                            const resp = await fetch('/admin/api/grammar/parsers');
+                            if (resp.ok) this.reasoningParsers = await resp.json();
+                            else if (resp.status === 401) window.location.href = '/admin';
+                        } catch (_) { /* network error */ }
+                    }
                 }
                 this.selectedModel = model;
-                // Load existing settings if available
-                const settings = model.settings || {};
-                // Parse chat_template_kwargs into ctKwargEntries
-                const ctk = settings.chat_template_kwargs || {};
-                const forcedKeys = new Set(settings.forced_ct_kwargs || []);
-                const ctKwargEntries = [];
-                for (const [key, value] of Object.entries(ctk)) {
-                    if (key === 'enable_thinking') {
-                        ctKwargEntries.push({type: 'enable_thinking', value: String(value), force: forcedKeys.has('enable_thinking')});
-                    } else if (key === 'reasoning_effort') {
-                        ctKwargEntries.push({type: 'reasoning_effort', value: String(value), force: forcedKeys.has('reasoning_effort')});
-                    } else {
-                        ctKwargEntries.push({type: 'custom', key, value: String(value), force: forcedKeys.has(key)});
+                this.modelSettings = this.buildModelSettingsState(
+                    model,
+                    model.settings || {},
+                );
+                if (isDiffusion) {
+                    this.profilesDrift = false;
+                } else {
+                    this.computeDrift();
+                }
+                this.showModelSettingsModal = true;
+            },
+
+            async importMtplxSidecar() {
+                if (!this.selectedModel || this.importingMtplx) return;
+                this.importingMtplx = true;
+                try {
+                    const response = await fetch(`/admin/api/models/${encodeURIComponent(this.selectedModel.id)}/import-mtplx`, {
+                        method: 'POST',
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        alert(data.detail || window.t('js.error.mtplx_import_failed'));
+                        return;
+                    }
+                    if (data.message) alert(data.message);
+                    // Refresh so mtp_compatible flips and the toggle unlocks.
+                    await this.loadModels();
+                    const model = this.models.find(m => m.id === this.selectedModel.id);
+                    if (model) await this.openModelSettings(model);
+                } catch (e) {
+                    alert(window.t('js.error.mtplx_import_failed'));
+                } finally {
+                    this.importingMtplx = false;
+                }
+            },
+
+            isQwenOqA8Model(model) {
+                const type = String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_');
+                return ['qwen3_5', 'qwen3_6', 'qwen3_8'].some(prefix => type.startsWith(prefix));
+            },
+
+            validateQwenOqA8Settings() {
+                if (!this.modelSettings.qwen35_oq_a8_enabled) return null;
+                // Both wrap the same MLP call, so the combination silently
+                // disables one of them. Caught here so the modal explains it
+                // instead of surfacing the server's 400.
+                if (this.modelSettings.qwen35_ane_prefill_enabled) {
+                    return 'ANE prefill and INT8 activation prefill cannot both be '
+                        + 'enabled; they accelerate the same projections. Turn one off.';
+                }
+                const minTokens = Number(this.modelSettings.qwen35_oq_a8_min_tokens);
+                if (!Number.isInteger(minTokens) || minTokens < 1) {
+                    return 'oQ A8 minimum prompt tokens must be a positive integer.';
+                }
+                return null;
+            },
+
+            validateQwenAneSettings() {
+                if (!this.modelSettings.qwen35_ane_prefill_enabled
+                    || this.selectedModel?.ane_prefill_backend !== 'qwen') return null;
+
+                const integer = (value, label, minimum) => {
+                    if (value === '' || value === null || value === undefined) {
+                        return `${label} is required.`;
+                    }
+                    const number = Number(value);
+                    if (!Number.isInteger(number)) return `${label} must be an integer.`;
+                    if (number < minimum) return `${label} must be at least ${minimum}.`;
+                    return null;
+                };
+                const fraction = (value, label, minimum, maximum) => {
+                    if (value === '' || value === null || value === undefined) {
+                        return `${label} is required.`;
+                    }
+                    const number = Number(value);
+                    if (!Number.isFinite(number)) return `${label} must be a number.`;
+                    if (number < minimum || number > maximum) {
+                        return `${label} must be between ${minimum} and ${maximum}.`;
+                    }
+                    return null;
+                };
+
+                const sequenceLength = Number(this.modelSettings.qwen35_ane_prefill_sequence_length);
+                let error = integer(sequenceLength, 'ANE prompt block', 1024);
+                if (!error && sequenceLength % 64 !== 0) {
+                    error = 'ANE prompt block must be a multiple of 64.';
+                }
+                if (error) return error;
+                error = integer(
+                    this.modelSettings.qwen35_ane_prefill_tail_padding_min_tokens,
+                    'ANE tail padding threshold',
+                    0,
+                );
+                if (error) return error;
+                if (Number(this.modelSettings.qwen35_ane_prefill_tail_padding_min_tokens) >= sequenceLength) {
+                    return 'ANE tail padding threshold must be less than the prompt block.';
+                }
+                error = fraction(this.modelSettings.qwen35_ane_prefill_fraction, 'MLP ANE fraction', 0.05, 0.90);
+                if (error) return error;
+                error = integer(this.modelSettings.qwen35_ane_prefill_max_layers, 'ANE MLP layer limit', 1);
+                if (error) return error;
+
+                if (this.modelSettings.qwen35_ane_prefill_cpu_enabled) {
+                    error = fraction(this.modelSettings.qwen35_ane_prefill_cpu_fraction, 'CPU MLP fraction', 0, 0.25);
+                    if (error) return error;
+                    error = fraction(this.modelSettings.qwen35_ane_prefill_cpu_down_fraction, 'CPU MLP down fraction', 0, 0.50);
+                    if (error) return error;
+                    error = fraction(this.modelSettings.qwen35_ane_prefill_cpu_gdn_fraction, 'CPU GDN fraction', 0, 0.50);
+                    if (error) return error;
+                    error = integer(this.modelSettings.qwen35_ane_prefill_cpu_threads, 'CPU worker count', 0);
+                    if (error) return error;
+                    if (Number(this.modelSettings.qwen35_ane_prefill_cpu_threads) > 64) {
+                        return 'CPU worker count must be between 0 and 64.';
+                    }
+                    if (Number(this.modelSettings.qwen35_ane_prefill_fraction)
+                        + Number(this.modelSettings.qwen35_ane_prefill_cpu_fraction) >= 1) {
+                        return 'MLP ANE and CPU fractions must total less than 1.0.';
                     }
                 }
-                const isOcr = OCR_CONFIG_MODEL_TYPES.has(model.config_model_type || '');
-                this.modelSettings = {
-                    model_alias: settings.model_alias || '',
-                    model_type_override: settings.model_type_override || '',
-                    max_context_window: settings.max_context_window || null,
-                    max_tokens: settings.max_tokens || null,
-                    temperature: isOcr ? 0.0 : (settings.temperature ?? null),
-                    top_p: settings.top_p ?? null,
-                    top_k: settings.top_k ?? null,
-                    repetition_penalty: settings.repetition_penalty ?? null,
-                    min_p: settings.min_p ?? null,
-                    presence_penalty: settings.presence_penalty ?? null,
-                    force_sampling: settings.force_sampling || false,
-                    enable_thinking: settings.enable_thinking ?? null,
-                    thinking_default: model.thinking_default ?? null,
-                    enableThinkingBudget: !!(settings.thinking_budget_tokens),
-                    thinking_budget_tokens: settings.thinking_budget_tokens || null,
-                    guided_grammar_enabled: settings.guided_grammar_enabled || false,
-                    guided_grammar: settings.guided_grammar || '',
-                    enableToolResultLimit: !!(settings.max_tool_result_tokens),
-                    max_tool_result_tokens: settings.max_tool_result_tokens || null,
-                    reasoning_parser: settings.reasoning_parser || '',
-                    ttl_seconds: settings.ttl_seconds ?? null,
-                    enableIndexCache: !!(settings.index_cache_freq),
-                    index_cache_freq: settings.index_cache_freq || null,
-                    turboquant_kv_enabled: settings.turboquant_kv_enabled || false,
-                    turboquant_kv_bits: settings.turboquant_kv_bits || 4,
-                    specprefill_enabled: settings.specprefill_enabled || false,
-                    specprefill_draft_model: settings.specprefill_draft_model || '',
-                    specprefill_keep_pct: settings.specprefill_keep_pct ? String(settings.specprefill_keep_pct) : '0.2',
-                    specprefill_threshold: settings.specprefill_threshold || null,
-                    dflash_enabled: settings.dflash_enabled || false,
-                    dflash_draft_model: settings.dflash_draft_model || '',
-                    dflash_draft_quant_enabled: settings.dflash_draft_quant_enabled || false,
-                    dflash_draft_quant_weight_bits: settings.dflash_draft_quant_weight_bits || 4,
-                    dflash_draft_quant_activation_bits: settings.dflash_draft_quant_activation_bits || 16,
-                    dflash_draft_quant_group_size: settings.dflash_draft_quant_group_size || 64,
-                    dflash_max_ctx: settings.dflash_max_ctx ?? null,
-                    dflash_in_memory_cache: settings.dflash_in_memory_cache !== false,
-                    dflash_in_memory_cache_max_entries: settings.dflash_in_memory_cache_max_entries || 4,
-                    dflash_in_memory_cache_max_gib: settings.dflash_in_memory_cache_max_bytes
-                        ? Math.round(settings.dflash_in_memory_cache_max_bytes / (1024 ** 3))
-                        : 8,
-                    dflash_ssd_cache: settings.dflash_ssd_cache || false,
-                    dflash_ssd_cache_max_gib: settings.dflash_ssd_cache_max_bytes
-                        ? Math.round(settings.dflash_ssd_cache_max_bytes / (1024 ** 3))
-                        : 20,
-                    dflash_draft_window_size: settings.dflash_draft_window_size ?? null,
-                    dflash_draft_sink_size: settings.dflash_draft_sink_size ?? null,
-                    dflash_verify_mode: settings.dflash_verify_mode || 'adaptive',
-                    dflash_compatible: model.dflash_compatible !== false,
-                    dflash_compatibility_reason: model.dflash_compatibility_reason || '',
-                    dflash_ssd_cache_available: !!model.dflash_ssd_cache_available,
-                    mtp_enabled: settings.mtp_enabled || false,
-                    mtp_compatible: model.mtp_compatible === true,
-                    mtp_compatibility_reason: model.mtp_compatibility_reason || '',
-                    is_paroquant: model.is_paroquant === true,
-                    paroquant_reason: model.paroquant_reason || '',
-                    vlm_mtp_enabled: settings.vlm_mtp_enabled || false,
-                    vlm_mtp_draft_model: settings.vlm_mtp_draft_model || '',
-                    vlm_mtp_draft_block_size: settings.vlm_mtp_draft_block_size ?? null,
-                    ctKwargEntries,
-                    trust_remote_code: settings.trust_remote_code || false,
-                };
-                this.showModelSettingsModal = true;
+
+                if (this.modelSettings.qwen35_ane_prefill_gdn) {
+                    error = fraction(this.modelSettings.qwen35_ane_prefill_gdn_fraction, 'GDN ANE fraction', 0.05, 0.90);
+                    if (error) return error;
+                    if (this.modelSettings.qwen35_ane_prefill_cpu_enabled
+                        && Number(this.modelSettings.qwen35_ane_prefill_gdn_fraction)
+                        + Number(this.modelSettings.qwen35_ane_prefill_cpu_gdn_fraction) >= 1) {
+                        return 'GDN ANE and CPU fractions must total less than 1.0.';
+                    }
+                    error = integer(this.modelSettings.qwen35_ane_prefill_gdn_max_layers, 'ANE GDN layer limit', 0);
+                    if (error) return error;
+                }
+                return null;
             },
 
             async saveModelSettings() {
                 if (!this.selectedModel) return;
+
+                const qwenOqA8ValidationError = this.validateQwenOqA8Settings();
+                if (qwenOqA8ValidationError) {
+                    alert(qwenOqA8ValidationError);
+                    return;
+                }
+
+                const qwenAneValidationError = this.validateQwenAneSettings();
+                if (qwenAneValidationError) {
+                    alert(qwenAneValidationError);
+                    return;
+                }
 
                 this.savingModelSettings = true;
                 try {
@@ -1668,27 +2619,36 @@
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify((() => {
+                            const isDiffusion = !!this.modelSettings.is_diffusion_model;
                             // Build chat_template_kwargs and forced_ct_kwargs from ctKwargEntries
                             const chatTemplateKwargs = {};
                             const forcedCtKwargs = [];
                             for (const entry of this.modelSettings.ctKwargEntries) {
                                 if (entry.type === 'enable_thinking') {
+                                    if (isDiffusion) continue;
                                     chatTemplateKwargs.enable_thinking = entry.value === 'true';
                                     if (entry.force) forcedCtKwargs.push('enable_thinking');
                                 } else if (entry.type === 'reasoning_effort') {
-                                    chatTemplateKwargs.reasoning_effort = entry.value;
-                                    if (entry.force) forcedCtKwargs.push('reasoning_effort');
+                                    if (isDiffusion) continue;
+                                    const rawEffort = entry.custom
+                                        ? entry.customValue
+                                        : entry.value;
+                                    const effort = this.coerceKwargValue(rawEffort);
+                                    if (String(effort).trim() !== '') {
+                                        chatTemplateKwargs.reasoning_effort = effort;
+                                        if (entry.force) forcedCtKwargs.push('reasoning_effort');
+                                    }
                                 } else if (entry.type === 'custom' && entry.key && entry.key.trim()) {
-                                    let val = entry.value;
-                                    if (val === 'true') val = true;
-                                    else if (val === 'false') val = false;
-                                    else if (!isNaN(Number(val)) && val.trim() !== '') val = Number(val);
+                                    const val = this.coerceKwargValue(entry.value);
                                     const key = entry.key.trim();
+                                    if (isDiffusion && this.isDiffusionUnsupportedCtKwarg(key)) {
+                                        continue;
+                                    }
                                     chatTemplateKwargs[key] = val;
                                     if (entry.force) forcedCtKwargs.push(key);
                                 }
                             }
-                            return {
+                            const payload = {
                                 model_alias: this.modelSettings.model_alias?.trim() || null,
                                 model_type_override: this.modelSettings.model_type_override || null,
                                 max_context_window: this.modelSettings.max_context_window || null,
@@ -1705,7 +2665,15 @@
                                 index_cache_freq: this.modelSettings.enableIndexCache
                                     ? (this.modelSettings.index_cache_freq || 4)
                                     : 0,
-                                enable_thinking: this.modelSettings.enable_thinking,
+                                enable_thinking: this.selectedModel?.thinking_forced ? null : this.modelSettings.enable_thinking,
+                                qwen4_ple_ssd_offload:
+                                    !!this.modelSettings.qwen4_ple_ssd_offload,
+                                deepseek_v41_ced_prefill_enabled:
+                                    !!this.modelSettings.deepseek_v41_ced_prefill_enabled,
+                                deepseek_v41_engram_ssd_offload:
+                                    this.modelSettings.deepseek_v41_engram_ssd_offload_forced
+                                        ? !!this.modelSettings.deepseek_v41_engram_ssd_offload_requested
+                                        : !!this.modelSettings.deepseek_v41_engram_ssd_offload,
                                 thinking_budget_enabled: this.modelSettings.enableThinkingBudget,
                                 thinking_budget_tokens: this.modelSettings.enableThinkingBudget
                                     ? (this.modelSettings.thinking_budget_tokens || null)
@@ -1725,6 +2693,38 @@
                                 turboquant_kv_bits: this.modelSettings.turboquant_kv_enabled
                                     ? (parseFloat(this.modelSettings.turboquant_kv_bits) || 4)
                                     : 4,
+                                moe_expert_offload_enabled: !isDiffusion && this.selectedModel?.moe_expert_offload_supported === true && !!this.modelSettings.moe_expert_offload_enabled,
+                                moe_expert_offload_resident_fraction: this.modelSettings.moe_expert_offload_resident_fraction ?? 0.25,
+                                qwen35_oq_a8_enabled: !!this.modelSettings.qwen35_oq_a8_enabled,
+                                qwen35_oq_a8_min_tokens: Number(this.modelSettings.qwen35_oq_a8_min_tokens) || 128,
+                                qwen35_ane_prefill_enabled: !!this.modelSettings.qwen35_ane_prefill_enabled,
+                                // Validation only runs when the feature is enabled, so a
+                                // blank numeric input must fall back to the server default
+                                // instead of coercing to 0 and failing an unrelated save.
+                                qwen35_ane_prefill_sequence_length: Number(this.modelSettings.qwen35_ane_prefill_sequence_length) || 2048,
+                                qwen35_ane_prefill_tail_padding_min_tokens: Number.isFinite(Number(this.modelSettings.qwen35_ane_prefill_tail_padding_min_tokens))
+                                    ? Number(this.modelSettings.qwen35_ane_prefill_tail_padding_min_tokens)
+                                    : 0,
+                                qwen35_ane_prefill_fraction: Number(this.modelSettings.qwen35_ane_prefill_fraction),
+                                qwen35_ane_prefill_max_layers: Number(this.modelSettings.qwen35_ane_prefill_max_layers) || 64,
+                                qwen35_ane_prefill_dual_ane: !!this.modelSettings.qwen35_ane_prefill_dual_ane,
+                                qwen35_ane_prefill_gdn: !!this.modelSettings.qwen35_ane_prefill_gdn,
+                                qwen35_ane_prefill_gdn_fraction: Number(this.modelSettings.qwen35_ane_prefill_gdn_fraction) || 0.5,
+                                qwen35_ane_prefill_gdn_max_layers: Number.isFinite(Number(this.modelSettings.qwen35_ane_prefill_gdn_max_layers))
+                                    ? Number(this.modelSettings.qwen35_ane_prefill_gdn_max_layers)
+                                    : 48,
+                                qwen35_ane_prefill_cpu_enabled: !!this.modelSettings.qwen35_ane_prefill_cpu_enabled,
+                                qwen35_ane_prefill_cpu_fraction: Number(this.modelSettings.qwen35_ane_prefill_cpu_fraction),
+                                qwen35_ane_prefill_cpu_down_fraction: Number.isFinite(Number(this.modelSettings.qwen35_ane_prefill_cpu_down_fraction))
+                                    ? Number(this.modelSettings.qwen35_ane_prefill_cpu_down_fraction)
+                                    : 0,
+                                qwen35_ane_prefill_cpu_gdn_fraction: Number.isFinite(Number(this.modelSettings.qwen35_ane_prefill_cpu_gdn_fraction))
+                                    ? Number(this.modelSettings.qwen35_ane_prefill_cpu_gdn_fraction)
+                                    : 0,
+                                qwen35_ane_prefill_cpu_threads: Number.isFinite(Number(this.modelSettings.qwen35_ane_prefill_cpu_threads))
+                                    ? Number(this.modelSettings.qwen35_ane_prefill_cpu_threads)
+                                    : 8,
+                                qwen35_ane_prefill_cpu_shared_resource: !!this.modelSettings.qwen35_ane_prefill_cpu_shared_resource,
                                 specprefill_enabled: this.modelSettings.specprefill_enabled,
                                 specprefill_draft_model: this.modelSettings.specprefill_draft_model || null,
                                 specprefill_keep_pct: this.modelSettings.specprefill_enabled
@@ -1764,7 +2764,7 @@
                                 dflash_ssd_cache_max_bytes: this.modelSettings.dflash_enabled
                                     ? Math.max(1, parseInt(this.modelSettings.dflash_ssd_cache_max_gib) || 20) * (1024 ** 3)
                                     : 20 * (1024 ** 3),
-                                // Long-context tuning. Null → server keeps it null → dflash-mlx default.
+                                // Long-context tuning. Empty → oMLX default.
                                 dflash_draft_window_size: this.modelSettings.dflash_enabled
                                     && this.modelSettings.dflash_draft_window_size
                                     ? parseInt(this.modelSettings.dflash_draft_window_size)
@@ -1774,11 +2774,16 @@
                                     && this.modelSettings.dflash_draft_sink_size !== undefined
                                     && this.modelSettings.dflash_draft_sink_size !== ''
                                     ? parseInt(this.modelSettings.dflash_draft_sink_size)
+                                    : 0,
+                                dflash_block_size: this.modelSettings.dflash_enabled
+                                    && this.modelSettings.dflash_block_size
+                                    ? parseInt(this.modelSettings.dflash_block_size)
                                     : null,
                                 dflash_verify_mode: this.modelSettings.dflash_enabled
                                     ? (this.modelSettings.dflash_verify_mode || 'adaptive')
                                     : null,
                                 mtp_enabled: !!this.modelSettings.mtp_enabled,
+                                qwen35_ane_prefill_shared_fraction: Number(this.modelSettings.qwen35_ane_prefill_shared_fraction),
                                 vlm_mtp_enabled: !!this.modelSettings.vlm_mtp_enabled,
                                 vlm_mtp_draft_model: this.modelSettings.vlm_mtp_enabled
                                     ? (this.modelSettings.vlm_mtp_draft_model || null)
@@ -1789,6 +2794,66 @@
                                     : null,
                                 trust_remote_code: this.modelSettings.trust_remote_code,
                             };
+                            if (isDiffusion) {
+                                Object.assign(payload, {
+                                    top_p: null,
+                                    top_k: null,
+                                    repetition_penalty: null,
+                                    min_p: null,
+                                    presence_penalty: null,
+                                    force_sampling: false,
+                                    reasoning_parser: null,
+                                    index_cache_freq: 0,
+                                    enable_thinking: null,
+                                    thinking_budget_enabled: false,
+                                    thinking_budget_tokens: 0,
+                                    guided_grammar_enabled: false,
+                                    guided_grammar: null,
+                                    max_tool_result_tokens: 0,
+                                    turboquant_kv_enabled: false,
+                                    turboquant_kv_bits: 4,
+                                    qwen35_ane_prefill_enabled: false,
+                                    qwen35_ane_prefill_sequence_length: 2048,
+                                    qwen35_ane_prefill_tail_padding_min_tokens: 0,
+                                    qwen35_ane_prefill_fraction: 0.53,
+                                    qwen35_ane_prefill_max_layers: 64,
+                                    qwen35_ane_prefill_dual_ane: true,
+                                    qwen35_ane_prefill_gdn: true,
+                                    qwen35_ane_prefill_gdn_fraction: 0.5,
+                                    qwen35_ane_prefill_gdn_max_layers: 48,
+                                    qwen35_ane_prefill_cpu_enabled: false,
+                                    qwen35_ane_prefill_cpu_fraction: 0.135,
+                                    qwen35_ane_prefill_cpu_down_fraction: 0,
+                                    qwen35_ane_prefill_cpu_gdn_fraction: 0,
+                                    qwen35_ane_prefill_cpu_threads: 8,
+                                    qwen35_ane_prefill_cpu_shared_resource: true,
+                                    specprefill_enabled: false,
+                                    specprefill_draft_model: null,
+                                    specprefill_keep_pct: null,
+                                    specprefill_threshold: null,
+                                    dflash_enabled: false,
+                                    dflash_draft_model: null,
+                                    dflash_draft_quant_enabled: false,
+                                    dflash_draft_quant_weight_bits: null,
+                                    dflash_draft_quant_activation_bits: null,
+                                    dflash_draft_quant_group_size: null,
+                                    dflash_max_ctx: null,
+                                    dflash_in_memory_cache: true,
+                                    dflash_in_memory_cache_max_entries: 4,
+                                    dflash_in_memory_cache_max_bytes: 8 * (1024 ** 3),
+                                    dflash_ssd_cache: false,
+                                    dflash_ssd_cache_max_bytes: 20 * (1024 ** 3),
+                                    dflash_draft_window_size: null,
+                                    dflash_draft_sink_size: null,
+                                    dflash_block_size: null,
+                                    dflash_verify_mode: null,
+                                    mtp_enabled: false,
+                                    vlm_mtp_enabled: false,
+                                    vlm_mtp_draft_model: null,
+                                    vlm_mtp_draft_block_size: null,
+                                });
+                            }
+                            return payload;
                         })()),
                     });
 
@@ -1851,6 +2916,21 @@
                         this.modelSettings.ctKwargEntries = [];
                         this.modelSettings.turboquant_kv_enabled = false;
                         this.modelSettings.turboquant_kv_bits = 4;
+                        this.modelSettings.qwen35_ane_prefill_enabled = false;
+                        this.modelSettings.qwen35_ane_prefill_sequence_length = 2048;
+                        this.modelSettings.qwen35_ane_prefill_tail_padding_min_tokens = 0;
+                        this.modelSettings.qwen35_ane_prefill_fraction = this.selectedModel?.ane_prefill_default_fraction ?? 0.53;
+                        this.modelSettings.qwen35_ane_prefill_max_layers = 64;
+                        this.modelSettings.qwen35_ane_prefill_dual_ane = true;
+                        this.modelSettings.qwen35_ane_prefill_gdn = true;
+                        this.modelSettings.qwen35_ane_prefill_gdn_fraction = 0.5;
+                        this.modelSettings.qwen35_ane_prefill_gdn_max_layers = 48;
+                        this.modelSettings.qwen35_ane_prefill_cpu_enabled = false;
+                        this.modelSettings.qwen35_ane_prefill_cpu_fraction = 0.135;
+                        this.modelSettings.qwen35_ane_prefill_cpu_down_fraction = 0;
+                        this.modelSettings.qwen35_ane_prefill_cpu_gdn_fraction = 0;
+                        this.modelSettings.qwen35_ane_prefill_cpu_threads = 8;
+                        this.modelSettings.qwen35_ane_prefill_cpu_shared_resource = true;
                         this.modelSettings.specprefill_enabled = false;
                         this.modelSettings.specprefill_draft_model = null;
                         this.modelSettings.specprefill_keep_pct = 0.2;
@@ -1868,7 +2948,8 @@
                         this.modelSettings.dflash_ssd_cache = false;
                         this.modelSettings.dflash_ssd_cache_max_gib = 20;
                         this.modelSettings.dflash_draft_window_size = null;
-                        this.modelSettings.dflash_draft_sink_size = null;
+                        this.modelSettings.dflash_draft_sink_size = 0;
+                        this.modelSettings.dflash_block_size = null;
                         this.modelSettings.dflash_verify_mode = 'adaptive';
                         this.modelSettings.mtp_enabled = false;
                         this.modelSettings.trust_remote_code = false;
@@ -2085,7 +3166,9 @@
                 parts.push(this.shellEnvAssign('ANTHROPIC_DEFAULT_HAIKU_MODEL', haikuModel));
                 parts.push('API_TIMEOUT_MS=3000000');
                 parts.push('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1');
-                parts.push('claude');
+                // Deny LSP: its schema joins the tools array mid-session and
+                // re-prefills the whole conversation on a caching server (#2349).
+                parts.push('claude --disallowedTools LSP');
                 return parts.join(' ');
             },
 
@@ -2095,8 +3178,6 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            claude_code_context_scaling_enabled: this.globalSettings.claude_code.context_scaling_enabled,
-                            claude_code_target_context_size: this.globalSettings.claude_code.target_context_size,
                             claude_code_mode: this.globalSettings.claude_code.mode,
                             claude_code_opus_model: this.globalSettings.claude_code.opus_model,
                             claude_code_sonnet_model: this.globalSettings.claude_code.sonnet_model,
@@ -2123,6 +3204,10 @@
 
             get codexCommand() {
                 return this._launchCmd('codex');
+            },
+
+            get codexAppCommand() {
+                return this._launchCmd('codex_app');
             },
 
             get copilotCommand() {
@@ -2171,6 +3256,14 @@
                             markitdown_max_file_size_mb: this.globalSettings.integrations.markitdown_max_file_size_mb,
                             markitdown_max_files_per_request: this.globalSettings.integrations.markitdown_max_files_per_request,
                             markitdown_pdf_processing_engine: this.globalSettings.integrations.markitdown_pdf_processing_engine,
+                            web_search_provider: this.globalSettings.integrations.web_search_provider,
+                            web_search_brave_api_key: this.globalSettings.integrations.web_search_brave_api_key,
+                            web_search_searxng_url: this.globalSettings.integrations.web_search_searxng_url,
+                            web_search_ddgs_backends: this.globalSettings.integrations.web_search_ddgs_backends,
+                            web_search_max_results: this.globalSettings.integrations.web_search_max_results,
+                            web_search_content_mode: this.globalSettings.integrations.web_search_content_mode,
+                            web_search_content_truncate: this.globalSettings.integrations.web_search_content_truncate,
+                            web_search_content_max_chars: this.globalSettings.integrations.web_search_content_max_chars,
                         }),
                     });
                     if (!response.ok) {
@@ -2178,6 +3271,58 @@
                     }
                 } catch (err) {
                     console.error('Failed to save integration settings:', err);
+                }
+            },
+
+            ddgsBackendChecked(name) {
+                return (this.globalSettings.integrations.web_search_ddgs_backends || '')
+                    .split(',').map(s => s.trim()).filter(Boolean).includes(name);
+            },
+
+            toggleDdgsBackend(name) {
+                const current = (this.globalSettings.integrations.web_search_ddgs_backends || '')
+                    .split(',').map(s => s.trim()).filter(Boolean);
+                const next = current.includes(name)
+                    ? current.filter(b => b !== name)
+                    : [...current, name];
+                this.globalSettings.integrations.web_search_ddgs_backends = next.join(',');
+                this.saveIntegrationSettings();
+            },
+
+            async testWebSearch() {
+                if (this.webSearchTest.running) return;
+                this.webSearchTest = { running: true, ok: null, message: '' };
+                try {
+                    const response = await fetch('/admin/api/web-search/test', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            provider: this.globalSettings.integrations.web_search_provider,
+                            brave_api_key: this.globalSettings.integrations.web_search_brave_api_key || '',
+                            searxng_url: this.globalSettings.integrations.web_search_searxng_url || '',
+                            ddgs_backends: this.globalSettings.integrations.web_search_ddgs_backends || '',
+                            max_results: this.globalSettings.integrations.web_search_max_results,
+                        }),
+                    });
+                    const payload = await response.json();
+                    if (payload.ok) {
+                        this.webSearchTest = {
+                            running: false,
+                            ok: true,
+                            message: window.t('settings.integrations.websearch.test_success')
+                                .replace('{count}', (payload.results || []).length),
+                        };
+                    } else {
+                        const message = payload.error?.message
+                            || window.t('settings.integrations.websearch.test_failed');
+                        this.webSearchTest = { running: false, ok: false, message };
+                    }
+                } catch (err) {
+                    this.webSearchTest = {
+                        running: false,
+                        ok: false,
+                        message: window.t('settings.integrations.websearch.test_failed'),
+                    };
                 }
             },
 
@@ -2356,6 +3501,31 @@
                 return String(n);
             },
 
+            formatDFlashSessionStats(totals) {
+                if (!totals || totals.requests <= 1) return '';
+
+                const parts = [];
+                if (totals.speculative_requests > 0) {
+                    parts.push(
+                        Math.round((totals.acceptance_ratio || 0) * 100) + '% ' +
+                        window.t('status.active_models.dflash_draft_share'),
+                        (totals.accepted_draft_tokens_per_cycle || 0).toFixed(2) + ' ' +
+                        window.t('status.active_models.dflash_accepted_draft_per_cycle'),
+                        (totals.tokens_per_cycle || 0).toFixed(2) + ' ' +
+                        window.t('status.active_models.dflash_output_per_cycle'),
+                        totals.speculative_requests + ' ' +
+                        window.t('status.active_models.dflash_speculative_requests'),
+                    );
+                }
+                if (totals.fallback_requests > 0) {
+                    parts.push(
+                        totals.fallback_requests + ' ' +
+                        window.t('status.active_models.dflash_fallback_requests'),
+                    );
+                }
+                return window.t('status.active_models.dflash_session') + ': ' + parts.join(' · ');
+            },
+
             formatDurationShort(seconds) {
                 if (seconds == null || !Number.isFinite(seconds)) return '—';
                 if (seconds < 1) return seconds.toFixed(1) + 's';
@@ -2459,6 +3629,19 @@
                 return `~${actual} obs / ${estimated} est`;
             },
 
+            clusterBadgeLabel(cluster) {
+                if (!cluster) return '';
+                const tensor = window.t('cluster.badge.tensor') + '×' + (cluster.tensor_parallel_size || 1);
+                const pipeline = window.t('cluster.badge.pipeline') + '×' + (cluster.pipeline_stages || 1);
+                let strategy = tensor;
+                if (cluster.strategy === 'pipeline') {
+                    strategy = pipeline;
+                } else if (cluster.strategy === 'hybrid') {
+                    strategy = tensor + '+' + pipeline;
+                }
+                return window.t('cluster.badge.label') + ' · ' + strategy;
+            },
+
             copyToClipboard(text) {
                 if (navigator.clipboard && window.isSecureContext) {
                     navigator.clipboard.writeText(text).catch(() => {
@@ -2494,9 +3677,90 @@
                 }
             },
 
+            // Shared external endpoint settings (both bench tabs)
+            saveExternalEndpoint() {
+                localStorage.setItem('omlx_bench_external_base_url', this.externalBaseUrl.trim());
+                localStorage.setItem('omlx_bench_external_api_key', this.externalApiKey);
+                localStorage.setItem('omlx_bench_external_model', this.externalModel.trim());
+            },
+
+            externalConfigValid() {
+                return !!(this.externalBaseUrl.trim() && this.externalModel.trim());
+            },
+
+            externalRequestBody() {
+                return {
+                    base_url: this.externalBaseUrl.trim(),
+                    api_key: this.externalApiKey,
+                    model: this.externalModel.trim(),
+                };
+            },
+
+            parseAccuracyExtraBody() {
+                const raw = this.accExternalExtraBody.trim();
+                if (!raw) return {};
+
+                let value;
+                try {
+                    value = JSON.parse(raw);
+                } catch (_) {
+                    throw new Error(window.t('js.error.external_extra_body_invalid_json'));
+                }
+                if (value === null || Array.isArray(value) || typeof value !== 'object') {
+                    throw new Error(window.t('js.error.external_extra_body_object_required'));
+                }
+
+                const protectedFields = new Set([
+                    'model', 'messages', 'stream', 'stream_options',
+                    'max_tokens', 'temperature', 'api_key', 'authorization',
+                ]);
+                const blocked = Object.keys(value).filter(
+                    key => protectedFields.has(key.toLowerCase())
+                );
+                if (blocked.length > 0) {
+                    throw new Error(
+                        window.t('js.error.external_extra_body_protected')
+                            .replace('{fields}', blocked.sort().join(', '))
+                    );
+                }
+                return value;
+            },
+
+            saveAccExternalMaxTokens() {
+                localStorage.setItem('omlx_acc_external_max_tokens', this.accExternalMaxTokens.trim());
+            },
+
+            // Optional accuracy-only floor for per-question max_tokens.
+            // Returns null when unset; throws on invalid input.
+            parseAccuracyMaxTokens() {
+                const raw = this.accExternalMaxTokens.trim();
+                if (!raw) return null;
+                const value = Number(raw);
+                if (!Number.isInteger(value) || value < 1 || value > 1000000) {
+                    throw new Error(window.t('js.error.external_max_tokens_invalid'));
+                }
+                return value;
+            },
+
+            accuracyExternalRequestBody() {
+                const body = this.externalRequestBody();
+                const extraBody = this.parseAccuracyExtraBody();
+                if (Object.keys(extraBody).length > 0) body.extra_body = extraBody;
+                const maxTokens = this.parseAccuracyMaxTokens();
+                if (maxTokens !== null) body.max_tokens_override = maxTokens;
+                return body;
+            },
+
             // Benchmark functions
             async startBenchmark() {
-                if (!this.benchModelId) return;
+                if (this.benchExternalEnabled) {
+                    if (!this.externalConfigValid()) {
+                        this.benchError = window.t('js.error.external_endpoint_required');
+                        return;
+                    }
+                } else if (!this.benchModelId) {
+                    return;
+                }
 
                 // Collect selected prompt lengths
                 const promptLengths = Object.entries(this.benchPromptLengths)
@@ -2529,16 +3793,24 @@
                 this.benchUploadDone = null;
                 this.benchUploading = false;
                 this.benchUploadSkipped = null;
+                this.benchUploadFlags = [];
+                this.benchRunExternal = this.benchExternalEnabled
+                    ? { base_url: this.externalBaseUrl.trim(), model: this.externalModel.trim() }
+                    : null;
 
                 try {
                     const response = await fetch('/admin/api/bench/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            model_id: this.benchModelId,
+                            model_id: this.benchExternalEnabled ? this.externalModel.trim() : this.benchModelId,
+                            context_profile: this.benchContextProfile,
+                            align_prompt_to_ane: this.benchAlignPromptToAne,
                             prompt_lengths: promptLengths,
                             generation_length: 128,
                             batch_sizes: batchSizes,
+                            force_lm_engine: this.benchExternalEnabled ? false : this.benchForceLmEngine,
+                            external: this.benchExternalEnabled ? this.externalRequestBody() : null,
                         }),
                     });
 
@@ -2590,7 +3862,8 @@
                             // (pp, tg); batch rows by batch_size.
                             if (data.data.test_type === 'single') {
                                 const exists = this.benchSingleResults.some(
-                                    r => r.pp === data.data.pp && r.tg === data.data.tg
+                                    r => this.benchRequestedPp(r) === this.benchRequestedPp(data.data)
+                                        && r.tg === data.data.tg
                                 );
                                 if (!exists) {
                                     this.benchSingleResults = [...this.benchSingleResults, data.data];
@@ -2623,13 +3896,17 @@
                             }
                         } else if (data.type === 'upload_done') {
                             this.benchUploadDone = data.data;
+                            this.benchUploadFlags = data.data.feature_flags || [];
                             this.benchUploading = false;
                             this.benchRunning = false;
                             this.benchProgress = null;
                             es.close();
                             this.benchEventSource = null;
                         } else if (data.type === 'upload_skipped') {
-                            this.benchUploadSkipped = { features: data.features || [] };
+                            this.benchUploadSkipped = {
+                                reason: data.reason || 'external_endpoint',
+                                features: data.features || [],
+                            };
                             this.benchUploading = false;
                             this.benchRunning = false;
                             this.benchProgress = null;
@@ -2671,10 +3948,237 @@
                 // SSE handler will update state when error/done event arrives
             },
 
+            // Context benchmark functions
+            async startContextBenchmark() {
+                if (!this.ctxBenchModelId || this.ctxBenchRunning) return;
+
+                this.ctxBenchRunning = true;
+                this.ctxBenchProgress = null;
+                this.ctxBenchResult = null;
+                this.ctxBenchError = '';
+                this.ctxBenchBenchId = null;
+
+                try {
+                    const response = await fetch('/admin/api/bench/context/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model_id: this.ctxBenchModelId,
+                            target_tokens: this.ctxBenchTarget,
+                        }),
+                    });
+
+                    if (response.status === 401) {
+                        window.location.href = '/admin';
+                        return;
+                    }
+
+                    if (!response.ok) {
+                        const data = await response.json();
+                        this.ctxBenchError = data.detail || window.t('js.error.start_context_bench_failed');
+                        this.ctxBenchRunning = false;
+                        return;
+                    }
+
+                    const data = await response.json();
+                    this.ctxBenchBenchId = data.bench_id;
+                    this.connectContextBenchSSE(data.bench_id);
+                } catch (err) {
+                    console.error('Failed to start context benchmark:', err);
+                    this.ctxBenchError = window.t('js.error.start_context_bench_failed');
+                    this.ctxBenchRunning = false;
+                }
+            },
+
+            connectContextBenchSSE(benchId) {
+                if (this.ctxBenchEventSource) {
+                    this.ctxBenchEventSource.close();
+                }
+
+                const es = new EventSource(`/admin/api/bench/context/${benchId}/stream`);
+                this.ctxBenchEventSource = es;
+
+                es.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type === 'progress') {
+                            this.ctxBenchProgress = {
+                                phase: data.phase,
+                                progress: data.progress,
+                                message: data.message,
+                            };
+                        } else if (data.type === 'result') {
+                            this.ctxBenchResult = data.data;
+                        } else if (data.type === 'done') {
+                            this.ctxBenchRunning = false;
+                            this.ctxBenchProgress = null;
+                            es.close();
+                            this.ctxBenchEventSource = null;
+                            // The applied setting changed the model row.
+                            this.loadModels();
+                        } else if (data.type === 'error') {
+                            this.ctxBenchError = data.message;
+                            this.ctxBenchRunning = false;
+                            this.ctxBenchProgress = null;
+                            es.close();
+                            this.ctxBenchEventSource = null;
+                            this.loadModels();
+                        }
+                    } catch (err) {
+                        console.error('Failed to parse SSE event:', err);
+                    }
+                };
+
+                es.onerror = () => {
+                    if (this.ctxBenchRunning) {
+                        this.ctxBenchError = window.t('js.error.benchmark_connection_lost');
+                        this.ctxBenchRunning = false;
+                        this.ctxBenchProgress = null;
+                    }
+                    es.close();
+                    this.ctxBenchEventSource = null;
+                };
+            },
+
+            async cancelContextBenchmark() {
+                if (!this.ctxBenchBenchId) return;
+                try {
+                    await fetch(`/admin/api/bench/context/${this.ctxBenchBenchId}/cancel`, { method: 'POST' });
+                } catch (err) {
+                    console.error('Failed to cancel context benchmark:', err);
+                }
+                // SSE handler will update state when the error event arrives
+            },
+
+            async loadCtxBenchState() {
+                // Attach to an in-flight context bench (page refresh, other tab).
+                try {
+                    const resp = await fetch('/admin/api/bench/context/active');
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    if (!data.running || !data.bench_id) return;
+                    if (this.ctxBenchBenchId === data.bench_id && this.ctxBenchEventSource) {
+                        return;
+                    }
+                    this.ctxBenchBenchId = data.bench_id;
+                    this.ctxBenchModelId = data.model_id;
+                    if (data.target_tokens) this.ctxBenchTarget = data.target_tokens;
+                    this.ctxBenchRunning = true;
+                    this.ctxBenchResult = null;
+                    this.ctxBenchError = '';
+                    this.connectContextBenchSSE(data.bench_id);
+                } catch (err) {
+                    console.error('Failed to load context bench state:', err);
+                }
+            },
+
+            ctxBenchCappedByLabel() {
+                const capped = this.ctxBenchResult?.capped_by;
+                if (capped === 'target') return window.t('ctx_bench.capped.target');
+                if (capped === 'native') return window.t('ctx_bench.capped.native');
+                return window.t('ctx_bench.capped.memory');
+            },
+
+            // Native context length of the selected bench model (0 = unknown).
+            ctxBenchNativeLimit() {
+                const m = this.models.find(m => m.id === this.ctxBenchModelId);
+                return (m && m.model_context_length) || 0;
+            },
+
+            // Target presets the selected model can actually reach. Unknown
+            // native -> full list; native below the smallest preset -> keep
+            // the smallest (the server caps the search at native anyway).
+            ctxBenchTargetOptions() {
+                const all = [16384, 32768, 65536, 131072, 262144, 524288];
+                const native = this.ctxBenchNativeLimit();
+                if (!native) return all;
+                const filtered = all.filter(t => t <= native);
+                return filtered.length ? filtered : [all[0]];
+            },
+
+            // Keep the selected target inside the model's reachable presets.
+            ctxBenchClampTarget() {
+                const options = this.ctxBenchTargetOptions();
+                if (!options.includes(this.ctxBenchTarget)) {
+                    this.ctxBenchTarget = options[options.length - 1];
+                }
+            },
+
+            // Narrow-patch save of the global Prefill Priority setting from
+            // the bench tab (mirrors the Settings row; applied live server-side).
+            async saveCtxBenchPriority(value) {
+                if (this.ctxBenchRunning) return;
+                const prev = this.globalSettings.scheduler.prefill_priority;
+                if (prev === value) return;
+                this.globalSettings.scheduler.prefill_priority = value;
+                try {
+                    const resp = await fetch('/admin/api/global-settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prefill_priority: value }),
+                    });
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                } catch (err) {
+                    console.error('Failed to save prefill priority:', err);
+                    this.globalSettings.scheduler.prefill_priority = prev;
+                    this.ctxBenchError = window.t('js.error.save_prefill_priority_failed');
+                }
+            },
+
             benchGetSpeedup(batchResult) {
-                const baseline = this.benchSingleResults.find(r => r.pp === 1024);
-                if (!baseline || !baseline.gen_tps || baseline.gen_tps <= 0) return 0;
+                const baseline = this.benchFindSingle(1024);
+                if (!baseline || !baseline.gen_tps || baseline.gen_tps <= 0) return null;
+                if (batchResult.tg_tps === null || batchResult.tg_tps === undefined) return null;
                 return batchResult.tg_tps / baseline.gen_tps;
+            },
+
+            benchRequestedPp(result) {
+                return result?.requested_pp ?? result?.pp;
+            },
+
+            benchFindSingle(requestedPp) {
+                return this.benchSingleResults.find(
+                    r => this.benchRequestedPp(r) === requestedPp
+                );
+            },
+
+            benchSingleTestLabel(result) {
+                const requested = this.benchRequestedPp(result);
+                const actual = result?.pp;
+                if (requested !== actual) {
+                    return `pp${actual} (requested pp${requested})/tg${result.tg}`;
+                }
+                return `pp${actual}/tg${result.tg}`;
+            },
+
+            benchBatchPromptSummary() {
+                const result = this.benchBatchResults[0];
+                if (!result || result.requested_pp === undefined) {
+                    return window.t('bench.results.batch.subtitle');
+                }
+                const requested = result.requested_pp;
+                const minimum = result.prompt_tokens_min ?? result.pp;
+                const maximum = result.prompt_tokens_max ?? result.pp;
+                const actual = minimum === maximum
+                    ? `actual pp${minimum}`
+                    : `actual pp${minimum}-${maximum}`;
+                return `requested pp${requested} / ${actual} / tg${result.tg}`;
+            },
+
+            // Unmeasured metrics (tpot_ms/gen_tps/tg_tps, plus ttft/pp when
+            // no content delta was ever observed) come through as null
+            // rather than a misleading 0.0 — render them as N/A.
+            benchFmtNum(value, decimals, suffix = '') {
+                if (value === null || value === undefined) return 'N/A';
+                return value.toFixed(decimals) + suffix;
+            },
+
+            // Per-request pp TPS, null when the aggregate itself is unmeasured.
+            benchPpPerReq(batchResult) {
+                const pp = batchResult.pp_tps;
+                if (pp === null || pp === undefined) return null;
+                return pp / batchResult.batch_size;
             },
 
             benchFormatMemory(bytes) {
@@ -2692,7 +4196,14 @@
 
                 lines.push('oMLX - LLM inference, optimized for your Mac');
                 lines.push('https://github.com/jundot/omlx');
-                lines.push(`Benchmark Model: ${this.benchModelId}`);
+                if (this.benchRunExternal) {
+                    lines.push(`Benchmark Model: ${this.benchRunExternal.model} @ ${this.benchRunExternal.base_url}`);
+                    lines.push('Engine: External OpenAI-compatible endpoint');
+                } else {
+                    lines.push(`Benchmark Model: ${this.benchModelId}`);
+                    lines.push(`Engine: ${this.benchForceLmEngine ? 'Force mlx-lm' : 'Auto'}`);
+                }
+                lines.push(`Context: ${this.benchContextLabel(this.benchContextProfile)}`);
                 lines.push('='.repeat(80));
 
                 // Single Request Results
@@ -2700,15 +4211,15 @@
                     lines.push('');
                     lines.push('Single Request Results');
                     lines.push('-'.repeat(80));
-                    const hdr = [rpad('Test', 16), pad('TTFT(ms)', 10), pad('TPOT(ms)', 10), pad('pp TPS', 12), pad('tg TPS', 12), pad('E2E(s)', 10), pad('Throughput', 12), pad('Peak Mem', 10)];
+                    const hdr = [rpad('Test', 32), pad('TTFT(ms)', 10), pad('TPOT(ms)', 10), pad('pp TPS', 12), pad('tg TPS', 12), pad('E2E(s)', 10), pad('Throughput', 12), pad('Peak Mem', 10)];
                     lines.push(hdr.join('  '));
                     for (const r of this.benchSingleResults) {
                         const row = [
-                            rpad(`pp${r.pp}/tg${r.tg}`, 16),
-                            pad(r.ttft_ms.toFixed(1), 10),
-                            pad(r.tpot_ms.toFixed(2), 10),
-                            pad(r.processing_tps.toFixed(1) + ' tok/s', 12),
-                            pad(r.gen_tps.toFixed(1) + ' tok/s', 12),
+                            rpad(this.benchSingleTestLabel(r), 32),
+                            pad(this.benchFmtNum(r.ttft_ms, 1), 10),
+                            pad(this.benchFmtNum(r.tpot_ms, 2), 10),
+                            pad(this.benchFmtNum(r.processing_tps, 1, ' tok/s'), 12),
+                            pad(this.benchFmtNum(r.gen_tps, 1, ' tok/s'), 12),
                             pad(r.e2e_latency_s.toFixed(3), 10),
                             pad(r.total_throughput.toFixed(1) + ' tok/s', 12),
                             pad(this.benchFormatMemory(r.peak_memory_bytes), 10),
@@ -2720,7 +4231,7 @@
                 // Helper for batch table text
                 const buildBatchText = (title, subtitle, results) => {
                     if (results.length === 0) return;
-                    const baseline = this.benchSingleResults.find(r => r.pp === 1024);
+                    const baseline = this.benchFindSingle(1024);
                     lines.push('');
                     lines.push(`${title}`);
                     lines.push(subtitle);
@@ -2730,24 +4241,24 @@
                     if (baseline) {
                         const row = [
                             rpad('1x', 8),
-                            pad(baseline.gen_tps.toFixed(1) + ' tok/s', 12),
+                            pad(this.benchFmtNum(baseline.gen_tps, 1, ' tok/s'), 12),
                             pad('1.00x', 8),
-                            pad(baseline.processing_tps.toFixed(1) + ' tok/s', 12),
-                            pad(baseline.processing_tps.toFixed(1) + ' tok/s', 12),
-                            pad(baseline.ttft_ms.toFixed(1), 10),
+                            pad(this.benchFmtNum(baseline.processing_tps, 1, ' tok/s'), 12),
+                            pad(this.benchFmtNum(baseline.processing_tps, 1, ' tok/s'), 12),
+                            pad(this.benchFmtNum(baseline.ttft_ms, 1), 10),
                             pad(baseline.e2e_latency_s.toFixed(3), 10),
                         ];
                         lines.push(row.join('  '));
                     }
                     for (const r of results) {
-                        const speedup = baseline && baseline.gen_tps > 0 ? (r.tg_tps / baseline.gen_tps).toFixed(2) + 'x' : '-';
+                        const speedup = this.benchGetSpeedup(r);
                         const row = [
                             rpad(r.batch_size + 'x', 8),
-                            pad(r.tg_tps.toFixed(1) + ' tok/s', 12),
-                            pad(speedup, 8),
-                            pad(r.pp_tps.toFixed(1) + ' tok/s', 12),
-                            pad((r.pp_tps / r.batch_size).toFixed(1) + ' tok/s', 12),
-                            pad(r.avg_ttft_ms.toFixed(1), 10),
+                            pad(this.benchFmtNum(r.tg_tps, 1, ' tok/s'), 12),
+                            pad(speedup !== null ? speedup.toFixed(2) + 'x' : 'N/A', 8),
+                            pad(this.benchFmtNum(r.pp_tps, 1, ' tok/s'), 12),
+                            pad(this.benchFmtNum(this.benchPpPerReq(r), 1, ' tok/s'), 12),
+                            pad(this.benchFmtNum(r.avg_ttft_ms, 1), 10),
                             pad(r.e2e_latency_s.toFixed(3), 10),
                         ];
                         lines.push(row.join('  '));
@@ -2756,7 +4267,7 @@
 
                 buildBatchText(
                     'Continuous Batching',
-                    'pp1024 / tg128',
+                    this.benchBatchPromptSummary(),
                     this.benchBatchResults
                 );
 
@@ -2830,19 +4341,54 @@
                         this.benchOtherActive = {
                             bench_id: data.bench_id,
                             model_id: data.model_id,
+                            context_profile: data.context_profile || 'code_python',
+                            force_lm_engine: !!data.force_lm_engine,
+                            external: !!data.external,
                         };
                         return;
                     }
 
                     // Fresh slate: attach.
                     this.benchBenchId = data.bench_id;
-                    this.benchModelId = data.model_id;
+                    this._restoreBenchRunSource(data);
                     this.benchRunning = true;
                     this.benchOtherActive = null;
                     this.connectBenchSSE(data.bench_id);
                 } catch (err) {
                     console.error('Failed to load bench state:', err);
                 }
+            },
+
+            // Restore the config UI from an active run discovered via
+            // /api/bench/active. External model ids aren't in the local
+            // dropdown, so the external flag drives which controls light up.
+            _restoreBenchRunSource(data) {
+                this.benchContextProfile = data.context_profile || 'code_python';
+                if (data.external) {
+                    this.benchExternalEnabled = true;
+                    this.benchRunExternal = {
+                        // base_url is intentionally not exposed by the API;
+                        // fall back to this browser's stored setting.
+                        base_url: this.externalBaseUrl.trim(),
+                        model: data.model_id,
+                    };
+                } else {
+                    this.benchModelId = data.model_id;
+                    this.benchForceLmEngine = !!data.force_lm_engine;
+                    this.benchExternalEnabled = false;
+                    this.benchRunExternal = null;
+                }
+            },
+
+            benchContextLabel(profile) {
+                const keys = {
+                    code_python: 'bench.config.context.code_python',
+                    code_mixed: 'bench.config.context.code_mixed',
+                    novel_ko: 'bench.config.context.novel_ko',
+                    novel_en: 'bench.config.context.novel_en',
+                    novel_ja: 'bench.config.context.novel_ja',
+                };
+                return window.t(keys[profile] || keys.code_python);
             },
 
             // User clicked "View live" on the banner — clear the stale
@@ -2854,13 +4400,14 @@
                 const other = this.benchOtherActive;
                 this.benchOtherActive = null;
                 this.benchBenchId = other.bench_id;
-                this.benchModelId = other.model_id;
+                this._restoreBenchRunSource(other);
                 this.benchRunning = true;
                 this.benchSingleResults = [];
                 this.benchBatchResults = [];
                 this.benchUploadResults = [];
                 this.benchUploadDone = null;
                 this.benchUploadSkipped = null;
+                this.benchUploadFlags = [];
                 this.benchProgress = null;
                 this.benchError = '';
                 this.connectBenchSSE(other.bench_id);
@@ -2882,6 +4429,13 @@
                 if (tab === 'throughput') {
                     this.loadBenchDeviceInfo();
                     this.loadBenchState();
+                }
+                if (tab === 'context') {
+                    this.loadCtxBenchState();
+                    // The priority segment mirrors the global setting —
+                    // refresh in case it changed on the Settings tab or in
+                    // another window.
+                    this.loadGlobalSettings();
                 }
             },
 
@@ -2929,7 +4483,21 @@
             },
 
             async addToAccQueue() {
-                if (!this.accModelId) return;
+                let externalRequest = null;
+                if (this.accExternalEnabled) {
+                    if (!this.externalConfigValid()) {
+                        this.accError = window.t('js.error.external_endpoint_required');
+                        return;
+                    }
+                    try {
+                        externalRequest = this.accuracyExternalRequestBody();
+                    } catch (err) {
+                        this.accError = err.message;
+                        return;
+                    }
+                } else if (!this.accModelId) {
+                    return;
+                }
                 const selected = Object.entries(this.accBenchmarks)
                     .filter(([_, v]) => v)
                     .map(([k]) => k);
@@ -2942,12 +4510,14 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            model_id: this.accModelId,
+                            model_id: this.accExternalEnabled ? this.externalModel.trim() : this.accModelId,
                             benchmarks: Object.fromEntries(
                                 selected.map(k => [k, this.accSampleSizes[k]])
                             ),
                             batch_size: this.accBatchSize,
-                            enable_thinking: this.accEnableThinking,
+                            enable_thinking: this.accExternalEnabled ? false : this.accEnableThinking,
+                            sampling_profile: this.accSamplingProfile,
+                            external: externalRequest,
                         }),
                     });
                     if (!resp.ok) {
@@ -3007,6 +4577,22 @@
                                     if (!exists) {
                                         data.data._showCategories = false;
                                         this.accAllResults.push(data.data);
+                                    }
+                                }
+                                break;
+                            case 'upload':
+                                // Community upload outcome for one suite. Idempotent
+                                // on replay: keyed to the same (model_id, benchmark)
+                                // as its result card. Array reassign for reactivity.
+                                {
+                                    const idx = this.accAllResults.findIndex(
+                                        r => r.model_id === data.data.model_id
+                                          && r.benchmark === data.data.benchmark
+                                    );
+                                    if (idx >= 0) {
+                                        const updated = { ...this.accAllResults[idx], upload: data.data };
+                                        this.accAllResults.splice(idx, 1, updated);
+                                        this.accAllResults = [...this.accAllResults];
                                     }
                                 }
                                 break;
@@ -3181,6 +4767,20 @@
                             pad(r.time_s, 10) +
                             pad(r.thinking_used ? 'Yes' : 'No', 8)
                         );
+                        if (r.external) {
+                            lines.push(
+                                `  Valid responses: ${r.valid_response_count}/${r.total}` +
+                                ` (${(r.valid_response_rate * 100).toFixed(1)}%)` +
+                                ` · Valid-answer accuracy: ${(r.valid_answer_accuracy * 100).toFixed(1)}%` +
+                                ` · Empty: ${r.empty_content_count}` +
+                                ` · Truncated: ${r.truncated_count}` +
+                                ` · Timeout: ${r.timeout_count}` +
+                                ` · HTTP: ${r.http_error_count}` +
+                                ` · Connection: ${r.connection_error_count}` +
+                                ` · Invalid: ${r.invalid_response_count}` +
+                                ` · Parse: ${r.parse_error_count}`
+                            );
+                        }
                     }
                 }
 
@@ -3210,7 +4810,7 @@
                 const qr = r.question_results || [];
 
                 if (format === 'json') {
-                    content = JSON.stringify({
+                    const exportData = {
                         model_id: r.model_id,
                         benchmark: r.benchmark,
                         accuracy: r.accuracy,
@@ -3220,13 +4820,43 @@
                         thinking_used: r.thinking_used || false,
                         category_scores: r.category_scores || null,
                         questions: qr,
-                    }, null, 2);
+                    };
+                    if (r.external) {
+                        Object.assign(exportData, {
+                            valid_response_count: r.valid_response_count,
+                            empty_content_count: r.empty_content_count,
+                            truncated_count: r.truncated_count,
+                            timeout_count: r.timeout_count,
+                            http_error_count: r.http_error_count,
+                            connection_error_count: r.connection_error_count,
+                            invalid_response_count: r.invalid_response_count,
+                            parse_error_count: r.parse_error_count,
+                            wrong_count: r.wrong_count,
+                            valid_response_rate: r.valid_response_rate,
+                            valid_answer_accuracy: r.valid_answer_accuracy,
+                            reliability_warning: r.reliability_warning,
+                        });
+                    }
+                    content = JSON.stringify(exportData, null, 2);
                     mime = 'application/json';
                 } else if (format === 'csv') {
                     const esc = s => '"' + (s || '').replace(/"/g, '""') + '"';
-                    const lines = ['id,category,correct,expected,predicted,question,raw_response,time_s'];
+                    const lines = [r.external
+                        ? 'id,category,status,correct,expected,predicted,finish_reason,reasoning_fields,prompt_tokens,completion_tokens,error_message,question,raw_response,time_s'
+                        : 'id,category,correct,expected,predicted,question,raw_response,time_s'];
                     for (const q of qr) {
-                        lines.push([q.id, esc(q.category || ''), q.correct, esc(q.expected), esc(q.predicted), esc(q.question), esc(q.raw_response), q.time_s].join(','));
+                        if (r.external) {
+                            lines.push([
+                                q.id, esc(q.category || ''), esc(q.status || ''), q.correct,
+                                esc(q.expected), esc(q.predicted), esc(q.finish_reason || ''),
+                                esc((q.reasoning_fields_nonempty || []).join('|')),
+                                q.prompt_tokens || 0, q.completion_tokens || 0,
+                                esc(q.error_message || ''), esc(q.question),
+                                esc(q.raw_response), q.time_s,
+                            ].join(','));
+                        } else {
+                            lines.push([q.id, esc(q.category || ''), q.correct, esc(q.expected), esc(q.predicted), esc(q.question), esc(q.raw_response), q.time_s].join(','));
+                        }
                     }
                     content = lines.join('\n');
                     mime = 'text/csv';
@@ -3238,9 +4868,20 @@
                         `Time: ${r.time_s}s`,
                         '',
                     ];
+                    if (r.external) {
+                        lines.splice(4, 0,
+                            `Valid responses: ${r.valid_response_count}/${r.total} (${(r.valid_response_rate * 100).toFixed(1)}%)`,
+                            `Valid-answer accuracy: ${(r.valid_answer_accuracy * 100).toFixed(1)}%`,
+                            `Empty: ${r.empty_content_count}; Truncated: ${r.truncated_count}; Timeout: ${r.timeout_count}; HTTP errors: ${r.http_error_count}; Connection errors: ${r.connection_error_count}; Invalid responses: ${r.invalid_response_count}; Parse errors: ${r.parse_error_count}`
+                        );
+                    }
                     for (const q of qr) {
-                        lines.push(`--- Q${q.id} [${q.correct ? 'CORRECT' : 'WRONG'}] ---`);
+                        const label = r.external ? (q.status || 'invalid_response').toUpperCase() : (q.correct ? 'CORRECT' : 'WRONG');
+                        lines.push(`--- Q${q.id} [${label}] ---`);
                         if (q.category) lines.push(`Category: ${q.category}`);
+                        if (r.external && q.finish_reason) lines.push(`Finish reason: ${q.finish_reason}`);
+                        if (r.external && (q.reasoning_fields_nonempty || []).length) lines.push(`Reasoning fields: ${q.reasoning_fields_nonempty.join(', ')}`);
+                        if (r.external && q.error_message) lines.push(`Error: ${q.error_message}`);
                         lines.push(`Question: ${q.question || ''}`);
                         lines.push(`Expected: ${q.expected}`);
                         lines.push(`Predicted: ${q.predicted}`);
@@ -3279,9 +4920,11 @@
                 const LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
                 const idx = LEVELS.indexOf(lvl);
                 const minIdx = LEVELS.indexOf(this.logMinLevel);
+                // Levels at or above the minimum are all shown dark so the
+                // included range is obvious; the selected minimum keeps the ring.
                 if (idx < minIdx) return 'bg-neutral-100 text-neutral-300';
                 if (idx === minIdx) return 'bg-neutral-900 text-white';
-                return 'bg-neutral-200 text-neutral-700';
+                return 'bg-neutral-700 text-white';
             },
 
             async loadLogs() {
@@ -3494,11 +5137,16 @@
                 const bold = (gb) => `<strong>${fmt(gb)} GB</strong>`;
 
                 // Static / metal cap for the final clamp shown to the user.
+                // The small-system threshold must track
+                // ProcessMemoryEnforcer._SMALL_SYSTEM_THRESHOLD (24 GB): under
+                // it the server reserves a flat 4 GB regardless of tier. This
+                // read 16 and so understated the static ceiling by up to 4 GB
+                // on every 16-23 GB Mac.
                 const totalGB = (sys.total_memory_bytes || 0) / GB;
                 const staticReserveGB =
                     tier === 'custom'
                         ? 2
-                        : totalGB < 16
+                        : totalGB < 24
                             ? 4
                             : { safe: 8, balanced: 6, aggressive: 4 }[tier] ?? 6;
                 const staticCeiling = Math.max(0, totalGB - staticReserveGB);
@@ -3659,15 +5307,19 @@
                 return `${gb}GB`;
             },
 
-            // Sort models
+            // Filter + sort models
             get sortedModels() {
-                return [...this.models].sort((a, b) => {
+                return [...this.filterModelsByName(this.models, this.modelSearch)].sort((a, b) => {
+                    // Favorites always sort first, regardless of the active column.
+                    const favDiff = (b.is_favorite ? 1 : 0) - (a.is_favorite ? 1 : 0);
+                    if (favDiff !== 0) return favDiff;
+
                     let aVal, bVal;
 
                     switch (this.sortBy) {
                         case 'id':
-                            aVal = (a.id || '').toLowerCase();
-                            bVal = (b.id || '').toLowerCase();
+                            aVal = (a.display_name || a.id || '').toLowerCase();
+                            bVal = (b.display_name || b.id || '').toLowerCase();
                             break;
                         case 'type':
                             aVal = (a.model_type || 'llm').toLowerCase();
@@ -3689,6 +5341,10 @@
                             aVal = a.is_default ? 1 : 0;
                             bVal = b.is_default ? 1 : 0;
                             break;
+                        case 'is_hidden':
+                            aVal = a.is_hidden ? 1 : 0;
+                            bVal = b.is_hidden ? 1 : 0;
+                            break;
                         default:
                             return 0;
                     }
@@ -3706,13 +5362,130 @@
                     this.sortBy = column;
                     this.sortOrder = 'asc';
                 }
+                this.persistSort('omlx_models_sort_by', this.sortBy, 'omlx_models_sort_order', this.sortOrder);
+            },
+
+            resetSort() {
+                this.sortBy = MODELS_SORT_DEFAULT.by;
+                this.sortOrder = MODELS_SORT_DEFAULT.order;
+                try {
+                    localStorage.removeItem('omlx_models_sort_by');
+                    localStorage.removeItem('omlx_models_sort_order');
+                } catch (e) { /* storage disabled */ }
+            },
+
+            get isModelsSortDefault() {
+                return this.sortBy === MODELS_SORT_DEFAULT.by
+                    && this.sortOrder === MODELS_SORT_DEFAULT.order;
+            },
+
+            // ---- Manager (Browse Models > Local) filter + sort ----
+
+            // Cross-reference the richer /api/models entry (has model_type,
+            // settings) for a manager row keyed by its model name.
+            managerModelInfo(name) {
+                return this.models.find(m => m.id === name);
+            },
+
+            filterModelsByName(list, query) {
+                const q = (query || '').trim().toLowerCase();
+                if (!q) return list;
+                return list.filter(m => {
+                    const id = (m.id || m.name || '').toLowerCase();
+                    const display = (m.display_name || '').toLowerCase();
+                    const alias = (
+                        (m.settings && m.settings.model_alias)
+                        || (this.managerModelInfo(m.name) && this.managerModelInfo(m.name).settings
+                            && this.managerModelInfo(m.name).settings.model_alias)
+                        || ''
+                    ).toLowerCase();
+                    return id.includes(q) || display.includes(q) || alias.includes(q);
+                });
+            },
+
+            get sortedManagerModels() {
+                const list = this.filterModelsByName(this.hfModels, this.managerSearch);
+                return [...list].sort((a, b) => {
+                    // Favorites always sort first, regardless of the active column.
+                    const aFav = this.managerModelInfo(a.name)?.is_favorite ? 1 : 0;
+                    const bFav = this.managerModelInfo(b.name)?.is_favorite ? 1 : 0;
+                    if (aFav !== bFav) return bFav - aFav;
+
+                    let aVal, bVal;
+                    switch (this.managerSortBy) {
+                        case 'name':
+                            aVal = (a.display_name || a.name || '').toLowerCase();
+                            bVal = (b.display_name || b.name || '').toLowerCase();
+                            break;
+                        case 'type':
+                            aVal = (this.managerModelInfo(a.name)?.model_type || 'llm').toLowerCase();
+                            bVal = (this.managerModelInfo(b.name)?.model_type || 'llm').toLowerCase();
+                            break;
+                        case 'size':
+                            aVal = a.size || 0;
+                            bVal = b.size || 0;
+                            break;
+                        default:
+                            return 0;
+                    }
+                    if (aVal < bVal) return this.managerSortOrder === 'asc' ? -1 : 1;
+                    if (aVal > bVal) return this.managerSortOrder === 'asc' ? 1 : -1;
+                    return 0;
+                });
+            },
+
+            toggleManagerSort(column) {
+                if (this.managerSortBy === column) {
+                    this.managerSortOrder = this.managerSortOrder === 'asc' ? 'desc' : 'asc';
+                } else {
+                    this.managerSortBy = column;
+                    this.managerSortOrder = 'asc';
+                }
+                this.persistSort('omlx_manager_sort_by', this.managerSortBy, 'omlx_manager_sort_order', this.managerSortOrder);
+            },
+
+            resetManagerSort() {
+                this.managerSortBy = MANAGER_SORT_DEFAULT.by;
+                this.managerSortOrder = MANAGER_SORT_DEFAULT.order;
+                try {
+                    localStorage.removeItem('omlx_manager_sort_by');
+                    localStorage.removeItem('omlx_manager_sort_order');
+                } catch (e) { /* storage disabled */ }
+            },
+
+            get isManagerSortDefault() {
+                return this.managerSortBy === MANAGER_SORT_DEFAULT.by
+                    && this.managerSortOrder === MANAGER_SORT_DEFAULT.order;
+            },
+
+            persistSort(byKey, byVal, orderKey, orderVal) {
+                try {
+                    localStorage.setItem(byKey, byVal);
+                    localStorage.setItem(orderKey, orderVal);
+                } catch (e) { /* storage disabled */ }
+            },
+
+            // Deeplink from a manager row to that model's settings card (modal).
+            openModelSettingsFromManager(name) {
+                const model = this.managerModelInfo(name);
+                if (model) this.openModelSettings(model);
             },
 
             // Theme select
             setTheme(theme) {
                 this.theme = theme;
-                localStorage.setItem('omlx-chat-theme', this.theme);
+                localStorage.setItem(THEME_STORAGE_KEY, this.theme);
                 this.applyTheme();
+            },
+
+            setEnhancedReadability(enabled) {
+                this.enhancedReadability = enabled;
+                localStorage.setItem(ENHANCED_READABILITY_KEY, enabled ? 'on' : 'off');
+                if (enabled) {
+                    document.documentElement.setAttribute('data-enhanced-readability', '');
+                } else {
+                    document.documentElement.removeAttribute('data-enhanced-readability');
+                }
             },
 
             applyTheme() {
@@ -3978,24 +5751,33 @@
                 this.oqSuccess = '';
                 this.oqStarting = true;
                 try {
+                    const payload = {
+                        model_path: this.oqSelectedModelPath,
+                        oq_level: this.oqLevel,
+                        group_size: 64,
+                        sensitivity_model_path: this.oqSensitivityModelPath,
+                        text_only: this.oqTextOnly,
+                        dtype: this.oqDtype,
+                        preserve_mtp: this.oqSelectedModelHasMtp() ? this.oqPreserveMtp : false,
+                        mtp_assistant_model_path: this.oqMtpAssistantCandidates().some(m => m.path === this.oqMtpAssistantPath)
+                            ? this.oqMtpAssistantPath : '',
+                    };
+                    if (this.oqEnhanced) {
+                        payload.enhanced = true;
+                        payload.imatrix_reuse_cache = this.oqeReuseImatrixCache;
+                        payload.imatrix_cache_path = this.oqeImatrixCachePath.trim();
+                        payload.imatrix_strict = this.oqeStrictImatrix;
+                    }
                     const response = await fetch('/admin/api/oq/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            model_path: this.oqSelectedModelPath,
-                            oq_level: this.oqLevel,
-                            group_size: 64,
-                            sensitivity_model_path: this.oqSensitivityModelPath,
-                            text_only: this.oqTextOnly,
-                            dtype: this.oqDtype,
-                            preserve_mtp: this.oqSelectedModelHasMtp() ? this.oqPreserveMtp : false,
-                        }),
+                        body: JSON.stringify(payload),
                     });
                     const data = await response.json().catch(() => ({}));
                     if (response.ok) {
                         const model = this.oqModels.find(m => m.path === this.oqSelectedModelPath);
                         const name = model ? model.name : this.oqSelectedModelPath;
-                        this.oqSuccess = `Quantization started: ${name} → oQ${this.oqLevel}`;
+                        this.oqSuccess = `Quantization started: ${name} → oQ${this.oqLevel}${this.oqEnhanced ? 'e' : ''}`;
                         await this.loadOQTasks();
                         this.startOQRefresh();
                         setTimeout(() => { this.oqSuccess = ''; }, 5000);
@@ -4065,7 +5847,8 @@
 
             formatOQProgress(task) {
                 const pct = Math.round(task.progress || 0);
-                return `${pct}% · ${task.phase || task.status}`;
+                const label = task.progress_detail || task.phase || task.status;
+                return `${pct}% · ${label}`;
             },
 
             formatOQElapsed(task) {
@@ -4086,6 +5869,47 @@
                     m.is_quantized &&
                     m.model_type === source.model_type
                 );
+            },
+
+            oqMtpAssistantCandidates() {
+                // Gemma 4 ships its MTP head as a separate gemma4_assistant
+                // checkpoint; offer to merge it into the quantized output.
+                // Qwen3.5/3.6 recipients can instead graft the native mtp.*
+                // head out of a same-geometry donor checkpoint (e.g. the
+                // base model of a fine-tune). Loose filter here; strict
+                // tokenizer/geometry validation happens server-side at
+                // submit.
+                if (!this.oqSelectedModelPath) return [];
+                const source = this.oqModels.find(m => m.path === this.oqSelectedModelPath);
+                if (!source) return [];
+                if (source.model_type === 'gemma4') {
+                    return this.oqAllModels.filter(m => m.model_type === 'gemma4_assistant');
+                }
+                const family = this.oqMtpFamily(source.model_type);
+                if (!family) return [];
+                if (this.oqSelectedModelHasMtp() && this.oqPreserveMtp) return [];
+                return this.oqAllModels.filter(m =>
+                    m.path !== source.path &&
+                    m.has_mtp_heads &&
+                    this.oqMtpFamily(m.model_type) === family &&
+                    (!m.hidden_size || !source.hidden_size || m.hidden_size === source.hidden_size)
+                );
+            },
+
+            oqMtpFamily(modelType) {
+                if (!modelType) return null;
+                if (modelType.startsWith('qwen3_6')) return 'qwen3_6';
+                if (modelType.startsWith('qwen3_5')) return 'qwen3_5';
+                return null;
+            },
+
+            oqSelectedModelType() {
+                const model = this.oqModels.find(m => m.path === this.oqSelectedModelPath);
+                return model?.model_type || '';
+            },
+
+            oqLevelLabel(level) {
+                return `oQ${level}${this.oqEnhanced ? 'e' : ''}`;
             },
 
             oqSelectedModelIsVLM() {
@@ -4317,6 +6141,7 @@
                     const response = await fetch(`/admin/api/hf/recommended?mlx_only=${this.hfMlxOnly}`, { signal: controller.signal });
                     if (response.ok) {
                         const data = await response.json();
+                        this.hfTokenInvalid = !!data.hf_token_invalid;
                         // Attach original rank so the # column survives column-header re-sorts
                         this.hfRecommended = {
                             trending: (data.trending || []).map((m, i) => ({ ...m, rank: i + 1 })),
@@ -4483,6 +6308,7 @@
                     const response = await fetch(`/admin/api/hf/search?${params}`, { signal: controller.signal });
                     if (response.ok) {
                         const data = await response.json();
+                        this.hfTokenInvalid = !!data.hf_token_invalid;
                         this.hfSearchResults = data.models || [];
                         this.hfSearchLoaded = true;
                         // Save to search history

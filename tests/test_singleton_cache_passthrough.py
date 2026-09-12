@@ -3,10 +3,12 @@
 import importlib
 
 import mlx.core as mx
+from mlx_lm.generate import PromptProcessingBatch, SequenceStateMachine
+from mlx_lm.models.cache import ArraysCache, BatchKVCache, CacheList, KVCache
+from mlx_vlm.turboquant import TurboQuantKVCache
 
 import omlx.scheduler  # noqa: F401  (applies BatchGenerator cache patches)
-from mlx_lm.generate import PromptProcessingBatch, SequenceStateMachine
-from mlx_lm.models.cache import ArraysCache, BatchKVCache, KVCache
+from omlx.turboquant_kv import BatchTurboQuantKVCache
 
 
 def _kv_cache(length: int) -> KVCache:
@@ -23,6 +25,13 @@ def _arrays_cache(value: float = 1.0) -> ArraysCache:
     cache = ArraysCache(1)
     cache[0] = mx.full((1, 2, 3), value)
     mx.eval(cache[0])
+    return cache
+
+
+def _tq_cache(length: int) -> TurboQuantKVCache:
+    fp_cache = _kv_cache(length)
+    cache = TurboQuantKVCache.from_cache(fp_cache, bits=4.0)
+    mx.eval(cache.keys, cache.values)
     return cache
 
 
@@ -51,6 +60,29 @@ def test_extend_converts_singleton_kv_to_batched_cache():
     assert batch_kv.left_padding.tolist() == [0, 2]
 
 
+def test_singleton_merge_preserves_plain_turboquant_cache():
+    gen = importlib.import_module("mlx_lm.generate")
+    tq = _tq_cache(4)
+
+    merged = gen._merge_caches([[tq]])
+
+    assert merged[0] is tq
+
+
+def test_extend_converts_plain_turboquant_to_batched_cache():
+    gen = importlib.import_module("mlx_lm.generate")
+    tq_a = _tq_cache(4)
+    tq_b = _tq_cache(2)
+
+    extended = gen._extend_cache([tq_a], [tq_b])
+    batch_tq = extended[0]
+    mx.eval(batch_tq.offset, batch_tq.left_padding)
+
+    assert isinstance(batch_tq, BatchTurboQuantKVCache)
+    assert batch_tq.offset.tolist() == [4, 2]
+    assert batch_tq.left_padding.tolist() == [0, 2]
+
+
 def test_extend_keeps_arrays_cache_in_place():
     gen = importlib.import_module("mlx_lm.generate")
     arrays_a = _arrays_cache(1.0)
@@ -60,6 +92,25 @@ def test_extend_keeps_arrays_cache_in_place():
 
     assert extended[0] is arrays_a
     assert arrays_a[0].shape[0] == 2
+
+
+def test_make_cache_finds_nested_model_owned_batch_conversion():
+    gen = importlib.import_module("mlx_lm.generate")
+
+    class CustomCache:
+        def to_batch(self, left_padding):
+            return ("custom-batch", tuple(left_padding))
+
+    class Model:
+        layers = (object(),)
+
+        def make_cache(self):
+            return [CacheList(CacheList(CustomCache()))]
+
+    caches = gen._make_cache(Model(), [2, 0], None)
+
+    nested = caches[0].caches[0].caches[0]
+    assert nested == ("custom-batch", (2, 0))
 
 
 def test_prompt_batch_full_split_moves_cache_without_copy():

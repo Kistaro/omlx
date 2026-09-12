@@ -5,6 +5,7 @@ This module provides session-based authentication using signed tokens
 and API key verification for admin panel access.
 """
 
+import hashlib
 import os
 import secrets
 from typing import Optional
@@ -134,6 +135,25 @@ def compare_keys(provided_key: str, expected_key: str) -> bool:
     )
 
 
+def fingerprint_key(api_key: str) -> str:
+    """Return a short, non-reversible fingerprint of an API key for logging.
+
+    Logging a rejected key verbatim leaks the client's secret into the server
+    log. A truncated SHA-256 digest lets operators correlate repeated
+    rejections of the same key without exposing the key itself. surrogatepass
+    matches compare_keys() so any str the auth path accepts can be
+    fingerprinted, including lone surrogates from json escape sequences.
+
+    Args:
+        api_key: The (untrusted) key to fingerprint. Empty string is allowed.
+
+    Returns:
+        The first 8 hex characters of the SHA-256 digest of the UTF-8 bytes.
+    """
+    digest = hashlib.sha256(api_key.encode("utf-8", "surrogatepass")).hexdigest()
+    return digest[:8]
+
+
 def verify_api_key(api_key: str, server_api_key: str) -> bool:
     """Verify an API key using constant-time comparison.
 
@@ -191,6 +211,14 @@ def validate_api_key(api_key: str) -> tuple[bool, str]:
     - Minimum 4 characters
     - No whitespace characters (space, tab, newline, etc.)
     - Printable characters only (no control characters)
+    - ASCII characters only
+
+    The ASCII-only rule is not cosmetic: HTTP request headers are decoded as
+    latin-1 by the ASGI layer, so a client cannot transmit a non-ASCII key
+    intact. A configured key such as "café" therefore starts the server
+    fine but can never be matched over the wire, yielding silent 401s on every
+    authenticated request. Rejecting it at configuration time surfaces the
+    misconfiguration immediately instead.
 
     Args:
         api_key: The API key string to validate.
@@ -204,6 +232,8 @@ def validate_api_key(api_key: str) -> tuple[bool, str]:
         return False, "API key must not contain whitespace"
     if not api_key.isprintable():
         return False, "API key must contain only printable characters"
+    if not api_key.isascii():
+        return False, "API key must contain only ASCII characters"
     return True, ""
 
 
@@ -249,7 +279,16 @@ async def require_admin(request: Request) -> bool:
     if _get_global_settings is not None:
         gs = _get_global_settings()
         if gs is not None and gs.auth.skip_api_key_verification:
-            return True
+            from ..server import _server_state
+            from ..utils.network import is_loopback_bind
+
+            active_host = gs.server.host
+            if getattr(_server_state, "global_settings", None) is gs:
+                bind_host = getattr(_server_state, "bind_host", None)
+                if isinstance(bind_host, str):
+                    active_host = bind_host
+            if is_loopback_bind(active_host):
+                return True
 
     if not verify_session(request):
         # Browser requests (Accept: text/html) get redirected to login page

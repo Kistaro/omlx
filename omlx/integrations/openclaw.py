@@ -49,11 +49,9 @@ class OpenClawIntegration(Integration):
                     "id": ctx.model,
                     "name": ctx.model,
                     "api": "openai-completions",
-                    "reasoning": (
-                        bool(ctx.reasoning)
-                        if ctx.reasoning is not None
-                        else False
-                    ),
+                    "reasoning": bool(ctx.reasoning)
+                    if ctx.reasoning is not None
+                    else False,
                     "input": ["text", "image"] if ctx.supports_images else ["text"],
                     "cost": {
                         "input": 0,
@@ -210,4 +208,4 @@ class OpenClawIntegration(Integration):
         print("OpenClaw is running")
 
         # Launch TUI (replaces this process)
-        os.execvpe(bin_name, [bin_name, "tui"], env)
+        os.execvpe(bin_name, [bin_name, "tui", *ctx.extra_args], env)

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from omlx.config import OMLXConfig
 from omlx.settings import (
     BURST_DECODE_MODES,
     DEFAULT_BURST_DECODE_MODE,
@@ -27,12 +28,14 @@ from omlx.settings import (
     SamplingSettings,
     SchedulerSettings,
     ServerSettings,
+    UsageSettings,
     burst_decode_env,
     get_settings,
     get_ssd_capacity,
     get_system_memory,
     init_settings,
     reset_settings,
+    resolve_default_base_path,
 )
 
 
@@ -49,6 +52,10 @@ class TestServerSettings:
         assert settings.sse_keepalive_mode == "chunk"
         assert settings.auto_start_on_launch is True
         assert settings.burst_decode_mode == "balanced"
+        assert settings.preserve_mid_system_cache is True
+        assert settings.distributed_inference_enabled is False
+        assert settings.max_audio_upload_size == "100MB"
+        assert settings.max_audio_upload_bytes() == 100 * 1024 * 1024
 
     def test_custom_values(self):
         """Test custom values."""
@@ -76,7 +83,19 @@ class TestServerSettings:
             "sse_keepalive_mode": "chunk",
             "auto_start_on_launch": True,
             "burst_decode_mode": "balanced",
+            "preserve_mid_system_cache": True,
+            "distributed_inference_enabled": False,
+            "max_audio_upload_size": "100MB",
         }
+
+    def test_from_dict_distributed_inference_is_opt_in(self):
+        assert ServerSettings.from_dict({}).distributed_inference_enabled is False
+        assert (
+            ServerSettings.from_dict(
+                {"distributed_inference_enabled": True}
+            ).distributed_inference_enabled
+            is True
+        )
 
     def test_from_dict_sse_keepalive_mode(self):
         """sse_keepalive_mode round-trips through from_dict / to_dict."""
@@ -97,11 +116,41 @@ class TestServerSettings:
         settings = ServerSettings.from_dict({})
         assert settings.burst_decode_mode == DEFAULT_BURST_DECODE_MODE
 
+    def test_from_dict_preserve_mid_system_cache(self):
+        """preserve_mid_system_cache round-trips through from_dict / to_dict."""
+        settings = ServerSettings.from_dict({"preserve_mid_system_cache": False})
+        assert settings.preserve_mid_system_cache is False
+        assert settings.to_dict()["preserve_mid_system_cache"] is False
+
+    def test_from_dict_preserve_mid_system_cache_default(self):
+        """Missing preserve_mid_system_cache keeps the cache-friendly default."""
+        settings = ServerSettings.from_dict({})
+        assert settings.preserve_mid_system_cache is True
+
     def test_from_dict_auto_start_on_launch(self):
         """auto_start_on_launch round-trips through from_dict / to_dict."""
         settings = ServerSettings.from_dict({"auto_start_on_launch": False})
         assert settings.auto_start_on_launch is False
         assert settings.to_dict()["auto_start_on_launch"] is False
+
+    def test_from_dict_max_audio_upload_size(self):
+        """max_audio_upload_size round-trips through from_dict / to_dict."""
+        settings = ServerSettings.from_dict({"max_audio_upload_size": "500MB"})
+        assert settings.max_audio_upload_size == "500MB"
+        assert settings.max_audio_upload_bytes() == 500 * 1024 * 1024
+        assert settings.to_dict()["max_audio_upload_size"] == "500MB"
+
+    def test_from_dict_max_audio_upload_size_default(self):
+        """A settings.json without max_audio_upload_size keeps the 100MB default."""
+        settings = ServerSettings.from_dict({})
+        assert settings.max_audio_upload_size == "100MB"
+
+    def test_max_audio_upload_bytes_rejects_non_positive(self):
+        """0MB / negative sizes parse as integers but are not usable limits."""
+        with pytest.raises(ValueError, match="must be positive"):
+            ServerSettings(max_audio_upload_size="0MB").max_audio_upload_bytes()
+        with pytest.raises(ValueError, match="must be positive"):
+            ServerSettings(max_audio_upload_size="-1MB").max_audio_upload_bytes()
 
     def test_from_dict(self):
         """Test creation from dictionary."""
@@ -235,6 +284,7 @@ class TestModelSettings:
             "model_dirs": ["/models"],
             "model_dir": "/models",
             "model_fallback": False,
+            "hide_helper_models": False,
         }
 
     def test_from_dict(self):
@@ -307,7 +357,31 @@ class TestSchedulerSettings:
             "max_concurrent_requests": 8,
             "embedding_batch_size": 32,
             "chunked_prefill": False,
+            "prefill_priority": "context",
+            "decode_fairness": True,
         }
+
+    def test_decode_fairness_from_dict(self):
+        """Defaults on; explicit false round-trips."""
+        assert SchedulerSettings.from_dict({}).decode_fairness is True
+        assert (
+            SchedulerSettings.from_dict(
+                {"decode_fairness": False}
+            ).decode_fairness
+            is False
+        )
+
+    def test_prefill_priority_from_dict(self):
+        """Valid values pass through; anything else falls back to context."""
+        assert SchedulerSettings.from_dict({}).prefill_priority == "context"
+        assert (
+            SchedulerSettings.from_dict({"prefill_priority": "speed"}).prefill_priority
+            == "speed"
+        )
+        assert (
+            SchedulerSettings.from_dict({"prefill_priority": "bogus"}).prefill_priority
+            == "context"
+        )
 
     def test_from_dict(self):
         """Test creation from dictionary."""
@@ -341,6 +415,12 @@ class TestCacheSettings:
         assert settings.enabled is True
         assert settings.ssd_cache_dir is None
         assert settings.ssd_cache_max_size == "auto"
+        assert settings.gdn_ssd_split_enabled is None
+        assert settings.get_gdn_snapshot_storage() == "auto"
+        assert settings.get_gdn_ssd_split_enabled() is True
+        assert settings.gdn_ssd_pending_max_size == "512MB"
+        assert settings.gdn_sidecar_state_dtype == "fp32"
+        assert settings.ane_compile_cache is False
         assert settings.initial_cache_blocks == 256
 
     def test_get_ssd_cache_dir_default(self):
@@ -378,9 +458,15 @@ class TestCacheSettings:
         assert result == {
             "enabled": False,
             "hot_cache_only": False,
+            "gdn_ssd_split_enabled": False,
+            "gdn_snapshot_storage": "auto",
+            "gdn_ssd_pending_max_size": "512MB",
+            "gdn_sidecar_precision": "fp32",
             "ssd_cache_dir": "/cache",
             "ssd_cache_max_size": "50GB",
             "hot_cache_max_size": "0",
+            "hot_cache_write_through": False,
+            "ane_compile_cache": False,
             "initial_cache_blocks": 256,
         }
 
@@ -396,6 +482,130 @@ class TestCacheSettings:
         assert settings.ssd_cache_dir == "/cache"
         assert settings.ssd_cache_max_size == "200GB"
         assert settings.initial_cache_blocks == 256  # default
+
+    def test_from_dict_loads_gdn_split_settings(self):
+        """GDN split settings round-trip through the settings file shape."""
+        settings = CacheSettings.from_dict(
+            {
+                "gdn_ssd_split_enabled": True,
+                "gdn_ssd_pending_max_size": "1GB",
+                "gdn_sidecar_precision": "int8",
+            }
+        )
+        assert settings.gdn_ssd_split_enabled is True
+        assert settings.gdn_ssd_pending_max_size == "1GB"
+        assert settings.gdn_sidecar_state_dtype == "int8"
+        assert settings.to_dict()["gdn_ssd_split_enabled"] is True
+        assert settings.to_dict()["gdn_ssd_pending_max_size"] == "1GB"
+
+    @pytest.mark.parametrize(
+        ("legacy_split", "expected_mode"),
+        [(False, "embedded"), (True, "ssd_sidecar")],
+    )
+    def test_from_dict_preserves_legacy_mode_and_fp32_default(
+        self, legacy_split, expected_mode
+    ):
+        settings = CacheSettings.from_dict(
+            {"gdn_ssd_split_enabled": legacy_split}
+        )
+        assert settings.gdn_ssd_split_enabled is legacy_split
+        assert settings.get_gdn_snapshot_storage() == expected_mode
+        assert settings.gdn_sidecar_state_dtype == "fp32"
+
+    def test_auto_policy_survives_dict_roundtrip(self):
+        original = CacheSettings()
+        restored = CacheSettings.from_dict(original.to_dict())
+        assert restored.gdn_ssd_split_enabled is None
+        assert restored.get_gdn_snapshot_storage() == "auto"
+        assert restored.get_gdn_ssd_split_enabled() is True
+        assert restored.gdn_sidecar_state_dtype == "fp32"
+
+    def test_from_dict_rejects_conflicting_mode_and_legacy_bool(self):
+        settings = CacheSettings.from_dict(
+            {
+                "gdn_snapshot_storage": "embedded",
+                "gdn_ssd_split_enabled": True,
+            }
+        )
+        global_settings = GlobalSettings(cache=settings)
+        assert any("gdn_snapshot_storage" in error for error in global_settings.validate())
+
+    def test_auto_policy_embeds_when_cache_is_disabled_or_hot_only(self):
+        settings = CacheSettings(enabled=False)
+        assert settings.get_gdn_ssd_split_enabled() is False
+        settings.enabled = True
+        settings.hot_cache_only = True
+        assert settings.get_gdn_ssd_split_enabled() is False
+
+    def test_from_dict_loads_rht_int8_gdn_state_dtype(self):
+        settings = CacheSettings.from_dict(
+            {
+                "gdn_ssd_split_enabled": True,
+                "gdn_sidecar_precision": "rht_int8",
+            }
+        )
+        assert settings.gdn_sidecar_state_dtype == "rht_int8"
+        assert settings.to_dict()["gdn_sidecar_precision"] == "rht_int8"
+
+    def test_from_dict_ignores_v060_gdn_sidecar_state_dtype(self):
+        """The v0.6.0 persisted lossy default must migrate back to fp32."""
+        settings = CacheSettings.from_dict(
+            {
+                "gdn_ssd_split_enabled": True,
+                "gdn_sidecar_state_dtype": "rht_int16",
+            }
+        )
+
+        assert settings.gdn_sidecar_state_dtype == "fp32"
+        assert "gdn_sidecar_state_dtype" not in settings.to_dict()
+        assert settings.to_dict()["gdn_sidecar_precision"] == "fp32"
+
+    def test_new_gdn_sidecar_precision_wins_over_v060_key(self):
+        """An explicit selection made with the new key survives reloads."""
+        settings = CacheSettings.from_dict(
+            {
+                "gdn_sidecar_state_dtype": "rht_int16",
+                "gdn_sidecar_precision": "bf16",
+            }
+        )
+
+        assert settings.gdn_sidecar_state_dtype == "bf16"
+
+    @pytest.mark.parametrize(
+        "raw", ["RHT_INT8", "Rht_Int8", "RHT_INT16", "INT8", "BF16", "FP32"]
+    )
+    def test_from_dict_normalizes_gdn_state_dtype_case(self, raw):
+        settings = CacheSettings.from_dict(
+            {"gdn_ssd_split_enabled": True, "gdn_sidecar_precision": raw}
+        )
+        assert settings.gdn_sidecar_state_dtype == raw.lower()
+
+    @pytest.mark.parametrize("raw", [None, 8, 3.5, ["int8"]])
+    def test_non_string_gdn_state_dtype_is_stringified_not_raised(self, raw):
+        """from_dict never raises; validate() is where the value is judged."""
+        settings = CacheSettings.from_dict(
+            {"gdn_ssd_split_enabled": True, "gdn_sidecar_precision": raw}
+        )
+        assert isinstance(settings.gdn_sidecar_state_dtype, str)
+        assert settings.gdn_sidecar_state_dtype not in {
+            "fp32",
+            "bf16",
+            "int8",
+            "rht_int8",
+            "rht_int16",
+        }
+
+    def test_gdn_state_dtype_survives_a_dict_roundtrip(self):
+        original = CacheSettings.from_dict(
+            {
+                "gdn_ssd_split_enabled": True,
+                "gdn_sidecar_precision": "rht_int8",
+                "gdn_ssd_pending_max_size": "512MB",
+            }
+        )
+        restored = CacheSettings.from_dict(original.to_dict())
+        assert restored.gdn_sidecar_state_dtype == "rht_int8"
+        assert restored.to_dict() == original.to_dict()
 
     def test_from_dict_with_initial_cache_blocks(self):
         """Test creation from dictionary with initial_cache_blocks."""
@@ -496,23 +706,148 @@ class TestMCPSettings:
         """Test default values."""
         settings = MCPSettings()
         assert settings.config_path is None
+        assert settings.expose_tools is True
 
     def test_custom_values(self):
         """Test custom values."""
-        settings = MCPSettings(config_path="/path/to/mcp.json")
+        settings = MCPSettings(config_path="/path/to/mcp.json", expose_tools=False)
         assert settings.config_path == "/path/to/mcp.json"
+        assert settings.expose_tools is False
 
     def test_to_dict(self):
         """Test conversion to dictionary."""
         settings = MCPSettings(config_path="/mcp/config.json")
         result = settings.to_dict()
-        assert result == {"config_path": "/mcp/config.json"}
+        assert result == {"config_path": "/mcp/config.json", "expose_tools": True}
+
+    def test_to_dict_expose_tools_false(self):
+        """expose_tools=False survives the to_dict round trip."""
+        settings = MCPSettings(config_path="/mcp/config.json", expose_tools=False)
+        result = settings.to_dict()
+        assert result == {"config_path": "/mcp/config.json", "expose_tools": False}
 
     def test_from_dict(self):
         """Test creation from dictionary."""
         data = {"config_path": "/some/path.json"}
         settings = MCPSettings.from_dict(data)
         assert settings.config_path == "/some/path.json"
+        assert settings.expose_tools is True
+
+    def test_from_dict_expose_tools_false(self):
+        """Test explicit expose_tools=False from dictionary."""
+        data = {"config_path": "/some/path.json", "expose_tools": False}
+        settings = MCPSettings.from_dict(data)
+        assert settings.config_path == "/some/path.json"
+        assert settings.expose_tools is False
+
+    def test_from_dict_missing_expose_tools_defaults_true(self):
+        """Legacy configs without expose_tools keep exposing tools."""
+        data = {"config_path": "/legacy/path.json"}
+        settings = MCPSettings.from_dict(data)
+        assert settings.expose_tools is True
+
+    def test_global_settings_save_load_round_trip_preserves_expose_tools(
+        self, tmp_path
+    ):
+        """save()/load() keep the MCP expose toggle across restarts."""
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.mcp.config_path = "/mcp.json"
+        gs.mcp.expose_tools = False
+        gs.save()
+
+        restored = GlobalSettings.load(base_path=tmp_path)
+        assert restored.mcp.config_path == "/mcp.json"
+        assert restored.mcp.expose_tools is False
+
+    def test_global_settings_save_load_defaults_expose_tools_true(self, tmp_path):
+        """Legacy settings files without expose_tools default to True."""
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.save()
+
+        settings_file = tmp_path / "settings.json"
+        data = json.loads(settings_file.read_text())
+        del data["mcp"]["expose_tools"]
+        settings_file.write_text(json.dumps(data))
+
+        restored = GlobalSettings.load(base_path=tmp_path)
+        assert restored.mcp.expose_tools is True
+
+    def test_global_settings_save_is_atomic(self, tmp_path):
+        """save() must never leave a temp file or a torn settings.json."""
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.save()
+
+        settings_file = tmp_path / "settings.json"
+        assert settings_file.exists()
+        json.loads(settings_file.read_text())  # parses cleanly
+        assert not list(tmp_path.glob("settings.json*.tmp"))
+        if os.name == "posix":
+            assert (settings_file.stat().st_mode & 0o777) == 0o600
+
+    def test_global_settings_corrupt_file_is_moved_aside(self, tmp_path):
+        """A corrupt settings.json is preserved as evidence, not silently eaten."""
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text('{"server": {"port": 9999}}garbage-tail')
+
+        restored = GlobalSettings.load(base_path=tmp_path)
+
+        assert restored.server.port == 8000  # defaults, not the torn file
+        assert not settings_file.exists()
+        backups = list(tmp_path.glob("settings.json.corrupt-*"))
+        assert len(backups) == 1
+        assert "garbage-tail" in backups[0].read_text()
+
+
+class TestUsageSettings:
+    """Tests for UsageSettings and the usage_history toggle."""
+
+    def test_default_values(self):
+        assert UsageSettings().usage_history is True
+        assert GlobalSettings().usage.usage_history is True
+
+    def test_to_dict_from_dict_round_trip(self):
+        settings = UsageSettings.from_dict({"usage_history": False})
+        assert settings.usage_history is False
+        assert settings.to_dict() == {"usage_history": False}
+        assert UsageSettings.from_dict({}).usage_history is True
+
+    def test_global_settings_save_load_round_trip(self, tmp_path):
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.usage.usage_history = False
+        gs.save()
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["usage"] == {"usage_history": False}
+        assert gs.to_dict()["usage"] == {"usage_history": False}
+        restored = GlobalSettings.load(base_path=tmp_path)
+        assert restored.usage.usage_history is False
+
+    def test_legacy_settings_file_defaults_on(self, tmp_path):
+        """Settings files written before the toggle existed keep recording."""
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.save()
+        settings_file = tmp_path / "settings.json"
+        data = json.loads(settings_file.read_text())
+        del data["usage"]
+        settings_file.write_text(json.dumps(data))
+        assert GlobalSettings.load(base_path=tmp_path).usage.usage_history is True
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("0", False),
+            ("false", False),
+            ("off", False),
+            ("1", True),
+            ("on", True),
+            ("TRUE", True),
+        ],
+    )
+    def test_env_override(self, tmp_path, monkeypatch, value, expected):
+        gs = GlobalSettings(base_path=tmp_path)
+        gs.usage.usage_history = not expected
+        gs.save()
+        monkeypatch.setenv("OMLX_USAGE_HISTORY", value)
+        assert GlobalSettings.load(base_path=tmp_path).usage.usage_history is expected
 
 
 class TestHuggingFaceSettings:
@@ -753,6 +1088,53 @@ class TestGlobalSettings:
             assert settings.auth.api_key is None
             assert settings.mcp.config_path is None
 
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "127.12.34.56", "localhost", "LOCALHOST.", "::1"],
+    )
+    def test_loopback_bind_does_not_require_api_key(self, host):
+        settings = GlobalSettings()
+        settings.server.host = host
+
+        assert not any("API key is required" in error for error in settings.validate())
+
+    @pytest.mark.parametrize(
+        "host",
+        ["0.0.0.0", "::", "192.168.1.10", "my-mac.local", "127.0.0.1,0.0.0.0"],
+    )
+    def test_network_bind_requires_api_key(self, host):
+        settings = GlobalSettings()
+        settings.server.host = host
+
+        assert any("API key is required" in error for error in settings.validate())
+
+    def test_network_bind_with_api_key_is_valid(self):
+        settings = GlobalSettings()
+        settings.server.host = "0.0.0.0"
+        settings.auth.api_key = "secret-key"
+
+        assert settings.validate() == []
+
+    def test_network_bind_rejects_api_key_bypass(self):
+        settings = GlobalSettings()
+        settings.server.host = "0.0.0.0"
+        settings.auth.api_key = "secret-key"
+        settings.auth.skip_api_key_verification = True
+
+        errors = settings.validate()
+
+        assert any("cannot be skipped" in error for error in errors)
+
+    @pytest.mark.parametrize("host", ["", "   ", "999.999.999.999"])
+    def test_invalid_bind_host_is_reported(self, host):
+        settings = GlobalSettings()
+        settings.server.host = host
+
+        errors = settings.validate()
+
+        assert any("host" in error.lower() for error in errors)
+        assert not any("API key is required" in error for error in errors)
+
     def test_get_effective_model_dirs_includes_hf_cache_between_dirs(
         self, tmp_path, monkeypatch
     ):
@@ -805,6 +1187,48 @@ class TestGlobalSettings:
 
         assert settings.memory.memory_guard_tier == "custom"
         assert settings.memory.memory_guard_custom_ceiling_gb == 48.0
+
+    def test_cli_memory_guard_off_disables_the_guard(self, tmp_path):
+        args = Namespace(memory_guard="off", memory_guard_gb=None)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.prefill_memory_guard is False
+        # The tier is left alone so turning the guard back on restores it.
+        assert settings.memory.memory_guard_tier == "balanced"
+
+    def test_cli_tier_turns_a_disabled_guard_back_on(self, tmp_path):
+        """A saved prefill_memory_guard=false used to make --memory-guard a
+        silent no-op: the enforcer reports a ceiling of 0 with the guard off,
+        so the requested tier governed nothing."""
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"memory": {"prefill_memory_guard": False}})
+        )
+        args = Namespace(memory_guard="aggressive", memory_guard_gb=None)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.prefill_memory_guard is True
+        assert settings.memory.memory_guard_tier == "aggressive"
+
+    def test_cli_memory_guard_gb_turns_a_disabled_guard_back_on(self, tmp_path):
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"memory": {"prefill_memory_guard": False}})
+        )
+        args = Namespace(memory_guard=None, memory_guard_gb=20.0)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.prefill_memory_guard is True
+        assert settings.memory.memory_guard_tier == "custom"
+        assert settings.memory.memory_guard_custom_ceiling_gb == 20.0
+
+    def test_cli_memory_guard_absent_leaves_saved_state(self, tmp_path):
+        """No flag means "use settings.json", both ways."""
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"memory": {"prefill_memory_guard": False}})
+        )
+        args = Namespace(memory_guard=None, memory_guard_gb=None)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.prefill_memory_guard is False
 
     def test_load_from_file(self):
         """Test loading settings from JSON file."""
@@ -869,6 +1293,32 @@ class TestGlobalSettings:
             assert settings.auth.api_key == "secret"
             assert settings.mcp.config_path == "/mcp.json"
 
+    def test_load_and_save_migrates_v060_gdn_sidecar_precision(
+        self, tmp_path, monkeypatch
+    ):
+        """A v0.6.0 settings file resets its persisted lossy default."""
+        monkeypatch.delenv("OMLX_GDN_SIDECAR_STATE_DTYPE", raising=False)
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text(
+            json.dumps(
+                {
+                    "version": "1.0",
+                    "cache": {
+                        "gdn_ssd_split_enabled": True,
+                        "gdn_sidecar_state_dtype": "rht_int16",
+                    },
+                }
+            )
+        )
+
+        settings = GlobalSettings.load(base_path=tmp_path)
+        assert settings.cache.gdn_sidecar_state_dtype == "fp32"
+
+        settings.save()
+        persisted_cache = json.loads(settings_file.read_text())["cache"]
+        assert "gdn_sidecar_state_dtype" not in persisted_cache
+        assert persisted_cache["gdn_sidecar_precision"] == "fp32"
+
     def test_load_nonexistent_file_uses_defaults(self):
         """Test loading with no settings file uses defaults."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -903,6 +1353,20 @@ class TestGlobalSettings:
             assert data["version"] == "1.0"
             assert data["server"]["port"] == 9001
             assert data["auth"]["api_key"] == "saved-key"
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+    def test_save_restricts_settings_file_permissions(self):
+        """Credential-bearing settings are readable only by their owner."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = GlobalSettings(base_path=Path(tmpdir))
+            settings.save()
+
+            settings_file = Path(tmpdir) / "settings.json"
+            assert settings_file.stat().st_mode & 0o777 == 0o600
+
+            settings_file.chmod(0o644)
+            settings.save()
+            assert settings_file.stat().st_mode & 0o777 == 0o600
 
     def test_save_and_load_cors_origins(self):
         """Test saving and loading cors_origins through settings file."""
@@ -1092,6 +1556,25 @@ class TestGlobalSettings:
             errors = settings.validate()
             assert errors == []
 
+    def test_validate_invalid_max_audio_upload_size(self):
+        """Validation rejects unparseable or non-positive audio upload limits."""
+        settings = GlobalSettings()
+        settings.server.max_audio_upload_size = "bogus"
+        errors = settings.validate()
+        assert any("max_audio_upload_size" in e for e in errors)
+
+        settings = GlobalSettings()
+        settings.server.max_audio_upload_size = "0MB"
+        errors = settings.validate()
+        assert any("max_audio_upload_size" in e for e in errors)
+
+    def test_validate_valid_max_audio_upload_size(self):
+        """Validation accepts human-readable audio upload sizes."""
+        settings = GlobalSettings()
+        settings.server.max_audio_upload_size = "250MB"
+        errors = settings.validate()
+        assert not any("max_audio_upload_size" in e for e in errors)
+
     def test_validate_memory_guard_tier_valid(self):
         """Test validation accepts each known tier."""
         for tier in ("safe", "balanced", "aggressive"):
@@ -1150,6 +1633,98 @@ class TestGlobalSettings:
         settings.cache.hot_cache_max_size = "not-a-size"
         errors = settings.validate()
         assert any("hot_cache_max_size" in e for e in errors)
+
+    def test_validate_gdn_split_requires_ssd_cache(self):
+        """GDN split cannot be enabled in hot-cache-only mode."""
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = True
+        settings.cache.hot_cache_only = True
+        errors = settings.validate()
+        assert any("gdn_ssd_split_enabled" in e for e in errors)
+        assert any("hot_cache_only" in e for e in errors)
+
+    def test_validate_gdn_pending_size(self):
+        """The pending write limit must be a positive size."""
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_pending_max_size = "not-a-size"
+        errors = settings.validate()
+        assert any("gdn_ssd_pending_max_size" in e for e in errors)
+
+    def test_reduced_gdn_dtype_is_dormant_when_embedded(self):
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = False
+        settings.cache.gdn_sidecar_state_dtype = "int8"
+        errors = settings.validate()
+        assert not any("gdn_sidecar_state_dtype" in e for e in errors)
+
+    def test_rht_int8_is_dormant_when_embedded(self):
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = False
+        settings.cache.gdn_sidecar_state_dtype = "rht_int8"
+        errors = settings.validate()
+        assert not any("gdn_sidecar_state_dtype" in e for e in errors)
+
+    @pytest.mark.parametrize(
+        "dtype", ["fp32", "bf16", "int8", "rht_int8", "rht_int16"]
+    )
+    def test_validate_accepts_every_dtype_with_split_enabled(self, dtype):
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = True
+        settings.cache.hot_cache_only = False
+        settings.cache.gdn_sidecar_state_dtype = dtype
+        errors = settings.validate()
+        assert not any("gdn_sidecar_state_dtype" in e for e in errors)
+
+    @pytest.mark.parametrize("dtype", ["fp8", "int4", "", "none", "8"])
+    def test_validate_rejects_unknown_dtype(self, dtype):
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = True
+        settings.cache.gdn_sidecar_state_dtype = dtype
+        errors = settings.validate()
+        assert any("must be one of" in e for e in errors)
+
+    def test_validate_reports_unknown_dtype_before_the_split_invariant(self):
+        """An unknown value is not also blamed on the split setting."""
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = False
+        settings.cache.gdn_sidecar_state_dtype = "fp8"
+        errors = settings.validate()
+        gdn_errors = [e for e in errors if "gdn_sidecar_state_dtype" in e]
+        assert len(gdn_errors) == 1
+        assert "must be one of" in gdn_errors[0]
+
+    def test_legacy_config_gdn_env_and_validation(self):
+        """The legacy config layer exposes the same GDN cache plumbing."""
+        with patch.dict(
+            os.environ,
+            {
+                "OMLX_GDN_SSD_SPLIT_ENABLED": "1",
+                "OMLX_GDN_SSD_PENDING_MAX_SIZE": "768MB",
+                "OMLX_GDN_SIDECAR_STATE_DTYPE": "bf16",
+            },
+            clear=False,
+        ):
+            config = OMLXConfig.from_env()
+        assert config.paged_ssd_cache.gdn_ssd_split_enabled is True
+        assert config.paged_ssd_cache.gdn_ssd_pending_max_size == "768MB"
+        assert config.paged_ssd_cache.gdn_sidecar_state_dtype == "bf16"
+
+        config.paged_ssd_cache.hot_cache_only = True
+        errors = config.validate()
+        assert any("gdn_ssd_split_enabled" in e for e in errors)
+
+    def test_legacy_config_gdn_storage_mode_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OMLX_GDN_SNAPSHOT_STORAGE": "embedded",
+                "OMLX_GDN_SSD_SPLIT_ENABLED": "1",
+            },
+            clear=False,
+        ):
+            config = OMLXConfig.from_env()
+        assert config.paged_ssd_cache.gdn_ssd_split_enabled is False
+        assert config.paged_ssd_cache.gdn_snapshot_storage == "embedded"
 
     def test_validate_invalid_initial_cache_blocks(self):
         """Test validation catches invalid initial_cache_blocks."""
@@ -1210,6 +1785,30 @@ class TestGlobalSettings:
                 assert settings.server.port == 9999
                 assert settings.server.log_level == "debug"
 
+    def test_env_override_max_audio_upload_size(self):
+        """OMLX_MAX_AUDIO_UPLOAD_SIZE overrides the default 100MB cap."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(
+                os.environ,
+                {"OMLX_MAX_AUDIO_UPLOAD_SIZE": "250MB"},
+                clear=False,
+            ):
+                settings = GlobalSettings.load(base_path=tmpdir)
+                assert settings.server.max_audio_upload_size == "250MB"
+                assert settings.server.max_audio_upload_bytes() == 250 * 1024 * 1024
+
+    def test_cli_override_max_audio_upload_size(self):
+        """--max-audio-upload-size is applied via CLI overrides."""
+        from argparse import Namespace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = GlobalSettings.load(
+                base_path=tmpdir,
+                cli_args=Namespace(max_audio_upload_size="500MB"),
+            )
+            assert settings.server.max_audio_upload_size == "500MB"
+            assert settings.server.max_audio_upload_bytes() == 500 * 1024 * 1024
+
     def test_env_override_model(self):
         """Test environment variable override for model settings."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1265,6 +1864,8 @@ class TestGlobalSettings:
                     "OMLX_CACHE_ENABLED": "false",
                     "OMLX_SSD_CACHE_DIR": "/env/cache",
                     "OMLX_SSD_CACHE_MAX_SIZE": "200GB",
+                    "OMLX_GDN_SSD_SPLIT_ENABLED": "true",
+                    "OMLX_GDN_SSD_PENDING_MAX_SIZE": "1GB",
                 },
                 clear=False,
             ):
@@ -1272,6 +1873,8 @@ class TestGlobalSettings:
                 assert settings.cache.enabled is False
                 assert settings.cache.ssd_cache_dir == "/env/cache"
                 assert settings.cache.ssd_cache_max_size == "200GB"
+                assert settings.cache.gdn_ssd_split_enabled is True
+                assert settings.cache.gdn_ssd_pending_max_size == "1GB"
 
     def test_env_override_initial_cache_blocks(self):
         """Test environment variable override for initial_cache_blocks."""
@@ -1412,6 +2015,61 @@ class TestGlobalSettings:
             assert settings.cache.ssd_cache_dir == "/cli/cache"
             assert settings.cache.ssd_cache_max_size == "500GB"
 
+    def test_cli_override_paged_ssd_cache(self):
+        """Public serve cache flags persist to the matching settings fields."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = Namespace(
+                paged_ssd_cache_dir="/cli/cache",
+                paged_ssd_cache_max_size="500GB",
+                hot_cache_max_size="8GB",
+                no_cache=False,
+            )
+            settings = GlobalSettings(base_path=Path(tmpdir))
+            settings.cache.enabled = False
+            settings._apply_cli_overrides(args)
+            assert settings.cache.enabled is True
+            assert settings.cache.ssd_cache_dir == "/cli/cache"
+            assert settings.cache.ssd_cache_max_size == "500GB"
+            assert settings.cache.hot_cache_max_size == "8GB"
+
+    def test_cli_override_no_cache(self):
+        """--no-cache persists an explicit cache disablement."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = GlobalSettings.load(
+                base_path=tmpdir,
+                cli_args=Namespace(
+                    paged_ssd_cache_dir="/cli/cache",
+                    no_cache=True,
+                ),
+            )
+            assert settings.cache.enabled is False
+            assert settings.cache.ssd_cache_dir == "/cli/cache"
+
+    def test_save_cli_overrides_preserves_runtime_secrets_and_env(self):
+        """Saving a CLI setting must not serialize transient overrides."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_path = Path(tmpdir)
+            stored = GlobalSettings(base_path=base_path)
+            stored.auth.api_key = "stored-key"
+            stored.cache.enabled = True
+            stored.save()
+
+            args = Namespace(port=8765, api_key="cli-key")
+            with patch.dict(
+                os.environ,
+                {"OMLX_API_KEY": "env-key", "OMLX_CACHE_ENABLED": "false"},
+                clear=False,
+            ):
+                runtime = GlobalSettings.load(base_path=base_path, cli_args=args)
+                assert runtime.auth.api_key == "cli-key"
+                assert runtime.cache.enabled is False
+                runtime.save_cli_overrides(args)
+
+            persisted = GlobalSettings.load(base_path=base_path)
+            assert persisted.server.port == 8765
+            assert persisted.auth.api_key == "stored-key"
+            assert persisted.cache.enabled is True
+
     def test_cli_override_initial_cache_blocks(self):
         """Test CLI override for initial_cache_blocks."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1513,6 +2171,9 @@ class TestGlobalSettings:
         assert scheduler_config.completion_batch_size == 128
         assert scheduler_config.embedding_batch_size == 12
         assert scheduler_config.initial_cache_blocks == 256  # default
+        assert scheduler_config.gdn_ssd_split_enabled is True
+        assert scheduler_config.gdn_ssd_pending_max_bytes == 512 * 1024**2
+        assert scheduler_config.gdn_sidecar_state_dtype == "fp32"
 
     def test_to_scheduler_config_initial_cache_blocks(self):
         """Test that initial_cache_blocks passes through to SchedulerConfig."""
@@ -1521,6 +2182,27 @@ class TestGlobalSettings:
 
         scheduler_config = settings.to_scheduler_config()
         assert scheduler_config.initial_cache_blocks == 8192
+
+    def test_to_scheduler_config_gdn_split_settings(self):
+        """GDN settings are attached to the scheduler config for later runtime use."""
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = True
+        settings.cache.gdn_ssd_pending_max_size = "1GB"
+        settings.cache.gdn_sidecar_state_dtype = "int8"
+
+        scheduler_config = settings.to_scheduler_config()
+        assert scheduler_config.gdn_ssd_split_enabled is True
+        assert scheduler_config.gdn_ssd_pending_max_bytes == 1024**3
+        assert scheduler_config.gdn_sidecar_state_dtype == "int8"
+
+    def test_to_scheduler_config_rht_int8_gdn_state_dtype(self):
+        settings = GlobalSettings()
+        settings.cache.gdn_ssd_split_enabled = True
+        settings.cache.gdn_sidecar_state_dtype = "rht_int8"
+
+        scheduler_config = settings.to_scheduler_config()
+        assert scheduler_config.gdn_ssd_split_enabled is True
+        assert scheduler_config.gdn_sidecar_state_dtype == "rht_int8"
 
 
 class TestInitSettings:
@@ -1601,13 +2283,8 @@ class TestHelperFunctions:
         memory = get_system_memory()
         assert isinstance(memory, int)
 
-    def test_get_system_memory_falls_back_when_psutil_fails(self):
-        """psutil may fail if macOS changes HOST_VM_INFO64 sizing."""
-
-        class BrokenPsutil:
-            @staticmethod
-            def virtual_memory():
-                raise RuntimeError("host_statistics64 failed")
+    def test_get_system_memory_uses_sysconf_before_compat(self):
+        """macOS should not depend on psutil's HOST_VM_INFO64 adapter."""
 
         def fake_sysconf(name):
             if name == "SC_PHYS_PAGES":
@@ -1616,10 +2293,24 @@ class TestHelperFunctions:
                 return 4096
             raise ValueError(name)
 
-        with patch.dict("sys.modules", {"psutil": BrokenPsutil}), patch(
-            "omlx.settings.os.sysconf", side_effect=fake_sysconf
+        with (
+            patch("omlx.settings.os.sysconf", side_effect=fake_sysconf),
+            patch(
+                "omlx.utils.psutil_compat.get_total_memory",
+                side_effect=AssertionError("compat should not be called"),
+            ),
         ):
             assert get_system_memory() == 123 * 4096
+
+    def test_get_system_memory_falls_back_to_compat_when_sysconf_fails(self):
+        with (
+            patch("omlx.settings.os.sysconf", side_effect=ValueError("unsupported")),
+            patch(
+                "omlx.utils.psutil_compat.get_total_memory",
+                return_value=32 * 1024**3,
+            ),
+        ):
+            assert get_system_memory() == 32 * 1024**3
 
     def test_get_ssd_capacity(self):
         """Test SSD capacity detection."""
@@ -1647,6 +2338,57 @@ class TestHelperFunctions:
         """Test SSD capacity with tilde path expansion."""
         capacity = get_ssd_capacity("~/")
         assert capacity > 0
+
+
+class TestResolveDefaultBasePath:
+    """Tests for resolve_default_base_path()."""
+
+    def test_falls_back_to_default_when_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("OMLX_BASE_PATH", raising=False)
+        monkeypatch.setattr(
+            "omlx.settings.BASE_PATH_BOOTSTRAP_FILE",
+            Path("/nonexistent/oMLX/base-path"),
+        )
+        assert resolve_default_base_path() == Path.home() / ".omlx"
+
+    def test_uses_bootstrap_file_when_present(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OMLX_BASE_PATH", raising=False)
+        custom_base = tmp_path / "external-ssd" / "omlx-data"
+        bootstrap_file = tmp_path / "base-path"
+        bootstrap_file.write_text(f"{custom_base}\n", encoding="utf-8")
+        monkeypatch.setattr("omlx.settings.BASE_PATH_BOOTSTRAP_FILE", bootstrap_file)
+
+        assert resolve_default_base_path() == custom_base.resolve()
+
+    def test_env_var_wins_over_bootstrap_file(self, monkeypatch, tmp_path):
+        env_base = tmp_path / "env-base"
+        bootstrap_base = tmp_path / "bootstrap-base"
+        bootstrap_file = tmp_path / "base-path"
+        bootstrap_file.write_text(str(bootstrap_base), encoding="utf-8")
+        monkeypatch.setattr("omlx.settings.BASE_PATH_BOOTSTRAP_FILE", bootstrap_file)
+        monkeypatch.setenv("OMLX_BASE_PATH", str(env_base))
+
+        assert resolve_default_base_path() == env_base.resolve()
+
+    def test_empty_bootstrap_file_falls_back_to_default(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OMLX_BASE_PATH", raising=False)
+        bootstrap_file = tmp_path / "base-path"
+        bootstrap_file.write_text("   \n", encoding="utf-8")
+        monkeypatch.setattr("omlx.settings.BASE_PATH_BOOTSTRAP_FILE", bootstrap_file)
+
+        assert resolve_default_base_path() == Path.home() / ".omlx"
+
+    def test_global_settings_load_uses_resolver_when_no_base_path_given(
+        self, monkeypatch, tmp_path
+    ):
+        resolved = tmp_path / "resolved-base"
+        monkeypatch.setattr(
+            "omlx.settings.resolve_default_base_path", lambda: resolved
+        )
+
+        settings = GlobalSettings.load()
+
+        assert settings.base_path == resolved
 
 
 class TestSettingsVersionMigration:
@@ -1783,9 +2525,7 @@ class TestSamplingSettings:
         d = unset.to_dict()
         assert d["max_context_window_policy"] is None
         # Setting an explicit value round-trips
-        with_policy = SamplingSettings.from_dict(
-            {"max_context_window_policy": 128_000}
-        )
+        with_policy = SamplingSettings.from_dict({"max_context_window_policy": 128_000})
         assert with_policy.max_context_window_policy == 128_000
         assert with_policy.to_dict()["max_context_window_policy"] == 128_000
 
@@ -1796,42 +2536,35 @@ class TestClaudeCodeSettings:
     def test_defaults(self):
         """Test default values."""
         settings = ClaudeCodeSettings()
-        assert settings.context_scaling_enabled is False
-        assert settings.target_context_size == 200000
-
-    def test_custom_values(self):
-        """Test custom values."""
-        settings = ClaudeCodeSettings(
-            context_scaling_enabled=True, target_context_size=131072
-        )
-        assert settings.context_scaling_enabled is True
-        assert settings.target_context_size == 131072
+        assert settings.mode == "cloud"
 
     def test_to_dict(self):
         """Test conversion to dictionary."""
-        settings = ClaudeCodeSettings(
-            context_scaling_enabled=True, target_context_size=100000
-        )
+        settings = ClaudeCodeSettings(mode="cloud")
         result = settings.to_dict()
-        assert result["context_scaling_enabled"] is True
-        assert result["target_context_size"] == 100000
         assert result["mode"] == "cloud"
         assert result["opus_model"] is None
         assert result["sonnet_model"] is None
         assert result["haiku_model"] is None
 
-    def test_from_dict(self):
-        """Test creation from dictionary."""
-        data = {"context_scaling_enabled": True, "target_context_size": 131072}
+    def test_from_dict_ignores_legacy_scaling_keys(self):
+        """Old settings.json with context_scaling_enabled/target_context_size
+        (or the later autocompact_threshold_pct) must load without error;
+        the removed keys are silently dropped — no cache-credit-adjacent
+        setting replaces them, since auto-compact is now driven entirely by
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_AUTO_COMPACT_WINDOW
+        (see fix-claude-code-autocompact-threshold's follow-up design)."""
+        data = {
+            "context_scaling_enabled": True,
+            "target_context_size": 1000000,
+            "autocompact_threshold_pct": 90,
+            "mode": "local",
+        }
         settings = ClaudeCodeSettings.from_dict(data)
-        assert settings.context_scaling_enabled is True
-        assert settings.target_context_size == 131072
-
-    def test_from_dict_defaults(self):
-        """Test from_dict uses defaults for missing fields."""
-        settings = ClaudeCodeSettings.from_dict({})
-        assert settings.context_scaling_enabled is False
-        assert settings.target_context_size == 200000
+        assert settings.mode == "local"
+        assert not hasattr(settings, "context_scaling_enabled")
+        assert not hasattr(settings, "target_context_size")
+        assert not hasattr(settings, "autocompact_threshold_pct")
 
     def test_new_fields_defaults(self):
         """Test that the four new fields have correct defaults."""
@@ -1941,9 +2674,7 @@ class TestIntegrationSettings:
 
     def test_from_dict_explicit_null_overrides_default(self):
         """Explicit None for a *_model field must be preserved."""
-        settings = IntegrationSettings.from_dict(
-            {"codex_model": None, "pi_model": "x"}
-        )
+        settings = IntegrationSettings.from_dict({"codex_model": None, "pi_model": "x"})
         assert settings.codex_model is None
         assert settings.pi_model == "x"
 
@@ -1962,7 +2693,7 @@ class TestIntegrationSettings:
     def test_markitdown_defaults(self):
         settings = IntegrationSettings()
         assert settings.markitdown_enabled is True
-        assert settings.markitdown_expose_model is True
+        assert settings.markitdown_expose_model is False
         assert settings.markitdown_max_file_size_mb == 25
         assert settings.markitdown_max_files_per_request == 5
         assert settings.markitdown_pdf_processing_engine == "markitdown"
@@ -1985,7 +2716,7 @@ class TestIntegrationSettings:
     def test_markitdown_from_dict_backward_compat(self):
         settings = IntegrationSettings.from_dict({})
         assert settings.markitdown_enabled is True
-        assert settings.markitdown_expose_model is True
+        assert settings.markitdown_expose_model is False
         assert settings.markitdown_max_file_size_mb == 25
         assert settings.markitdown_max_files_per_request == 5
         assert settings.markitdown_pdf_processing_engine == "markitdown"
@@ -1999,6 +2730,38 @@ class TestIntegrationSettings:
         assert "markitdown_max_file_size_mb must be > 0" in errors
         assert "markitdown_max_files_per_request must be > 0" in errors
         assert "markitdown_pdf_processing_engine must not be empty" in errors
+
+    def test_web_search_defaults(self):
+        settings = IntegrationSettings()
+        assert settings.web_search_provider == "ddgs"
+        assert settings.web_search_brave_api_key == ""
+        assert settings.web_search_searxng_url == ""
+        assert settings.web_search_ddgs_backends == ""
+        assert settings.web_search_max_results == 3
+        assert settings.web_search_content_mode == "snippet"
+        assert settings.web_search_content_truncate is True
+        assert settings.web_search_content_max_chars == 20000
+
+    def test_web_search_round_trip(self):
+        settings = IntegrationSettings(
+            web_search_provider="ddgs_custom",
+            web_search_brave_api_key="key123",
+            web_search_searxng_url="http://searx.local:8080",
+            web_search_ddgs_backends="yahoo,mojeek",
+            web_search_max_results=7,
+            web_search_content_mode="full",
+            web_search_content_truncate=False,
+            web_search_content_max_chars=5000,
+        )
+        round_tripped = IntegrationSettings.from_dict(settings.to_dict())
+        assert round_tripped.to_dict() == settings.to_dict()
+
+    def test_web_search_from_dict_backward_compat(self):
+        settings = IntegrationSettings.from_dict({})
+        assert settings.web_search_provider == "ddgs"
+        assert settings.web_search_ddgs_backends == ""
+        assert settings.web_search_max_results == 3
+        assert settings.web_search_content_mode == "snippet"
 
 
 class TestClaudeCodeValidation:
@@ -2046,11 +2809,9 @@ class TestClaudeCodeValidation:
 class TestClaudeCodeRouteIntegration:
     """Integration tests for the settings chain: dataclass <-> dict <-> routes."""
 
-    def test_claude_code_to_dict_has_six_keys(self):
-        """to_dict must include all six keys so GlobalSettings.save() persists them."""
+    def test_claude_code_to_dict_has_four_keys(self):
+        """to_dict must include all four keys so GlobalSettings.save() persists them."""
         s = ClaudeCodeSettings(
-            context_scaling_enabled=True,
-            target_context_size=100000,
             mode="local",
             opus_model="mlx-community/Qwen3-30B-A3B-4bit",
             sonnet_model="mlx-community/Qwen3-14B-4bit",
@@ -2058,8 +2819,6 @@ class TestClaudeCodeRouteIntegration:
         )
         d = s.to_dict()
         expected_keys = {
-            "context_scaling_enabled",
-            "target_context_size",
             "mode",
             "opus_model",
             "sonnet_model",

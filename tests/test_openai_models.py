@@ -451,6 +451,31 @@ class TestChatCompletionRequest:
         assert len(req.tools) == 1
         assert req.tool_choice == "auto"
 
+    def test_max_completion_tokens_alias(self):
+        """Test OpenAI max_completion_tokens maps to max_tokens."""
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_completion_tokens": 65536,
+            }
+        )
+
+        assert req.max_tokens == 65536
+
+    def test_max_tokens_preferred_over_alias(self):
+        """Test canonical max_tokens wins when both aliases are present."""
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 4096,
+                "max_completion_tokens": 65536,
+            }
+        )
+
+        assert req.max_tokens == 4096
+
     def test_request_validation_requires_model(self):
         """Test that model is required."""
         with pytest.raises(ValidationError):
@@ -475,6 +500,50 @@ class TestChatCompletionRequest:
 
         assert data["model"] == "gpt-4"
         assert data["messages"][0]["role"] == "user"
+
+    def test_top_level_enable_thinking_normalizes_to_template_kwargs(self):
+        """Top-level compatibility input must reach the template renderer."""
+        req = ChatCompletionRequest(
+            model="reasoning-model",
+            messages=[Message(role="user", content="Hello")],
+            enable_thinking=False,
+            thinking_budget=0,
+            chat_template_kwargs={"reasoning_effort": "low"},
+        )
+
+        assert req.enable_thinking is False
+        assert req.thinking_budget == 0
+        assert req.chat_template_kwargs == {
+            "enable_thinking": False,
+            "reasoning_effort": "low",
+        }
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_matching_thinking_alias_preserves_input(self, enabled):
+        template_kwargs = {"enable_thinking": enabled, "custom": "value"}
+        request = ChatCompletionRequest(
+            model="test", messages=[], enable_thinking=enabled,
+            chat_template_kwargs=template_kwargs,
+        )
+        assert request.chat_template_kwargs == template_kwargs
+        assert template_kwargs == {"enable_thinking": enabled, "custom": "value"}
+
+    def test_nested_thinking_without_alias_is_unchanged(self):
+        request = ChatCompletionRequest(
+            model="test", messages=[], chat_template_kwargs={"enable_thinking": False}
+        )
+        assert request.enable_thinking is None
+        assert request.chat_template_kwargs == {"enable_thinking": False}
+
+    def test_top_level_enable_thinking_rejects_nested_conflict(self):
+        """Conflicting control paths must fail instead of choosing silently."""
+        with pytest.raises(ValidationError, match="enable_thinking conflicts"):
+            ChatCompletionRequest(
+                model="reasoning-model",
+                messages=[Message(role="user", content="Hello")],
+                enable_thinking=False,
+                chat_template_kwargs={"enable_thinking": True},
+            )
 
     def test_xtc_defaults_to_none(self):
         """Test XTC params default to None (not sent by client)."""
@@ -504,6 +573,32 @@ class TestChatCompletionRequest:
             guided_grammar='root ::= "YES"',
         )
         assert req.guided_grammar == 'root ::= "YES"'
+
+    def test_reasoning_effort_accepted(self):
+        req = ChatCompletionRequest(
+            model="Qwen3.8-27B",
+            messages=[Message(role="user", content="Hello")],
+            reasoning_effort="xhigh",
+        )
+
+        assert req.reasoning_effort == "xhigh"
+
+    def test_reasoning_effort_accepts_numbers(self):
+        """Numeric effort (Inkling 0.1-0.99) must survive validation as-is."""
+        req_float = ChatCompletionRequest(
+            model="Inkling-Small",
+            messages=[Message(role="user", content="Hello")],
+            reasoning_effort=0.9,
+        )
+        assert req_float.reasoning_effort == 0.9
+        assert isinstance(req_float.reasoning_effort, float)
+
+        req_int = ChatCompletionRequest(
+            model="Inkling-Small",
+            messages=[Message(role="user", content="Hello")],
+            reasoning_effort=1,
+        )
+        assert req_int.reasoning_effort == 1
 
 
 class TestChatCompletionResponse:
@@ -664,6 +759,43 @@ class TestChatCompletionChunk:
 
 class TestCompletionModels:
     """Tests for text completion models."""
+
+    def test_repetition_context_size_defaults_to_none(self):
+        """The penalty window rides along only when a client sends it."""
+        chat = ChatCompletionRequest.model_validate(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        )
+        completion = CompletionRequest(model="m", prompt="hello")
+        assert chat.repetition_context_size is None
+        assert completion.repetition_context_size is None
+
+    def test_repetition_context_size_is_kept_and_validated(self):
+        chat = ChatCompletionRequest.model_validate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "repetition_context_size": 128,
+            }
+        )
+        assert chat.repetition_context_size == 128
+
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest.model_validate(
+                {
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "repetition_context_size": 0,
+                }
+            )
+
+        with pytest.raises(ValidationError):
+            CompletionRequest.model_validate(
+                {
+                    "model": "m",
+                    "prompt": "hello",
+                    "repetition_context_size": 0,
+                }
+            )
 
     def test_completion_request(self):
         """Test creating completion request."""

@@ -3,7 +3,7 @@
 // State machine
 //   stopped ─start()→ starting ─/health 200→ running ─/health fail×3→ unresponsive
 //                       │                       │ ↑                       │
-//                       │                       │ └─/health 200───────────┘
+//                       │                       │ └─/health or status OK──┘
 //                       │                       │
 //                       │                       └─process exit → auto-restart
 //                       └─process exit during startup → auto-restart
@@ -27,6 +27,43 @@
 
 import Foundation
 import Darwin
+
+struct AutoRestartBudget {
+    let maxAttempts: Int
+    let stableThreshold: TimeInterval
+
+    private(set) var attempts = 0
+    private(set) var healthySince: Date?
+
+    mutating func recordHealthy(at date: Date) {
+        if healthySince == nil {
+            healthySince = date
+        }
+        if attempts > 0,
+           let since = healthySince,
+           date.timeIntervalSince(since) >= stableThreshold {
+            attempts = 0
+            healthySince = date
+        }
+    }
+
+    mutating func consumeRestart(at date: Date) -> Int? {
+        if let since = healthySince,
+           date.timeIntervalSince(since) >= stableThreshold {
+            attempts = 0
+        }
+        healthySince = nil
+
+        guard attempts < maxAttempts else { return nil }
+        attempts += 1
+        return attempts
+    }
+
+    mutating func reset() {
+        attempts = 0
+        healthySince = nil
+    }
+}
 
 // @unchecked Sendable: state mutations either happen on the main thread
 // (start, stop, force restart, callbacks dispatched via main) or inside
@@ -104,8 +141,7 @@ final class ServerProcess: @unchecked Sendable {
 
     private let healthCheckInterval: TimeInterval = 5
     private let maxHealthFailures = 3
-    private let maxAutoRestarts   = 3
-    private let stableThreshold: TimeInterval = 60   // seconds before counter resets
+    private let auxiliaryHealthFreshness: TimeInterval = 15
     private let stopGraceSeconds: TimeInterval = 10
 
     // State
@@ -115,8 +151,11 @@ final class ServerProcess: @unchecked Sendable {
     private var logHandle: FileHandle?
     private var healthTask: Task<Void, Never>?
     private var consecutiveFailures = 0
-    private var autoRestartCount    = 0
-    private var lastHealthyAt: Date?
+    private var autoRestartBudget = AutoRestartBudget(
+        maxAttempts: 3,
+        stableThreshold: 60
+    )
+    private var lastAuxiliaryHealthyAt: Date?
     private var expectingExit       = false   // set by stop()/forceRestart() so terminationHandler doesn't trigger auto-restart
     private let logURL: URL
 
@@ -205,6 +244,7 @@ final class ServerProcess: @unchecked Sendable {
         }
         expectingExit = false
         process = nil
+        lastAuxiliaryHealthyAt = nil
         closeLog()
     }
 
@@ -223,11 +263,33 @@ final class ServerProcess: @unchecked Sendable {
         }
         process = nil
         closeLog()
-        autoRestartCount = 0
+        autoRestartBudget.reset()
         consecutiveFailures = 0
+        lastAuxiliaryHealthyAt = nil
         expectingExit = false
         update(.stopped)
         return try start()
+    }
+
+    /// Called by lightweight menubar status polling when the server answers
+    /// `/api/status`. Under heavy generation load this keeps the UI from
+    /// declaring the managed process unresponsive solely because `/health`
+    /// was delayed.
+    @MainActor
+    func recordAuxiliaryHealthSuccess(at date: Date = Date()) {
+        lastAuxiliaryHealthyAt = date
+        autoRestartBudget.recordHealthy(at: date)
+        consecutiveFailures = 0
+        switch state {
+        case .starting:
+            if let pid = process?.processIdentifier {
+                update(.running(pid: pid))
+            }
+        case .unresponsive(let pid):
+            update(.running(pid: pid))
+        default:
+            break
+        }
     }
 
     /// Synchronous SIGTERM-then-SIGKILL of the child, used by signal
@@ -250,6 +312,8 @@ final class ServerProcess: @unchecked Sendable {
     private func doStart() throws {
         try ensureDir(basePath)
         try ensureDir(logURL.deletingLastPathComponent())
+        consecutiveFailures = 0
+        lastAuxiliaryHealthyAt = nil
 
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
@@ -305,23 +369,22 @@ final class ServerProcess: @unchecked Sendable {
     }
 
     private func tryAutoRestart(reason: String) {
-        // Reset counter if last healthy was > stableThreshold ago.
-        if let last = lastHealthyAt,
-           Date().timeIntervalSince(last) >= stableThreshold {
-            autoRestartCount = 0
-        }
-
-        if autoRestartCount >= maxAutoRestarts {
-            update(.failed(message: "\(reason). Auto-restart failed after \(maxAutoRestarts) attempts."))
+        guard let attempt = autoRestartBudget.consumeRestart(at: Date()) else {
+            update(.failed(
+                message: "\(reason). Auto-restart failed after " +
+                         "\(autoRestartBudget.maxAttempts) attempts."
+            ))
             return
         }
 
-        autoRestartCount += 1
         consecutiveFailures = 0
-        let attempt = autoRestartCount
+        lastAuxiliaryHealthyAt = nil
         let backoff = TimeInterval(5 * (1 << (attempt - 1)))   // 5, 10, 20s
 
-        NSLog("oMLX: auto-restart \(attempt)/\(maxAutoRestarts) in \(Int(backoff))s — \(reason)")
+        NSLog(
+            "oMLX: auto-restart \(attempt)/\(autoRestartBudget.maxAttempts) " +
+            "in \(Int(backoff))s — \(reason)"
+        )
         update(.starting)
 
         Task { @MainActor [weak self] in
@@ -359,22 +422,31 @@ final class ServerProcess: @unchecked Sendable {
     @MainActor
     private func tickHealth() async {
         switch state {
+        case .starting, .running, .unresponsive:
+            break
+        default:
+            return
+        }
+
+        let probe = await resolver.probeHealth()
+        let now = Date()
+        switch state {
         case .starting:
-            if await resolver.isHealthy() {
+            if probe.ok || hasRecentAuxiliaryHealth(now: now) {
                 let pid = process?.processIdentifier ?? 0
-                consecutiveFailures = 0
-                lastHealthyAt = Date()
-                update(.running(pid: pid))
+                markHealthy(pid: pid, at: now)
+            } else {
+                logHealthProbeFailure(probe, failures: consecutiveFailures, suppressed: false)
             }
         case .running(let pid), .unresponsive(let pid):
-            if await resolver.isHealthy() {
-                consecutiveFailures = 0
-                lastHealthyAt = Date()
-                if case .unresponsive = state {
-                    update(.running(pid: pid))
-                }
+            if probe.ok {
+                markHealthy(pid: pid, at: now)
+            } else if hasRecentAuxiliaryHealth(now: now) {
+                logHealthProbeFailure(probe, failures: consecutiveFailures, suppressed: true)
+                markHealthy(pid: pid, at: now)
             } else {
                 consecutiveFailures += 1
+                logHealthProbeFailure(probe, failures: consecutiveFailures, suppressed: false)
                 if consecutiveFailures >= maxHealthFailures,
                    case .running = state {
                     update(.unresponsive(pid: pid))
@@ -383,6 +455,35 @@ final class ServerProcess: @unchecked Sendable {
         default:
             return
         }
+    }
+
+    @MainActor
+    private func markHealthy(pid: Int32, at date: Date) {
+        consecutiveFailures = 0
+        autoRestartBudget.recordHealthy(at: date)
+        switch state {
+        case .starting, .unresponsive:
+            update(.running(pid: pid))
+        default:
+            break
+        }
+    }
+
+    private func hasRecentAuxiliaryHealth(now: Date) -> Bool {
+        guard let lastAuxiliaryHealthyAt else { return false }
+        return now.timeIntervalSince(lastAuxiliaryHealthyAt) <= auxiliaryHealthFreshness
+    }
+
+    private func logHealthProbeFailure(
+        _ result: HealthProbeResult,
+        failures: Int,
+        suppressed: Bool
+    ) {
+        let status = result.statusCode.map(String.init) ?? "none"
+        let error = result.errorDescription ?? "none"
+        NSLog(
+            "oMLX: health probe failed url=\(result.url) latency_ms=\(result.latencyMs) status=\(status) error=\(error) failures=\(failures) suppressed_by_recent_status=\(suppressed)"
+        )
     }
 
     // MARK: - Internal — helpers

@@ -101,24 +101,46 @@ class TestModelsListAudio:
     @pytest.fixture
     def client_with_stt(self, stt_entry):
         """TestClient with a pool containing only an STT model."""
-        from omlx.server import ServerState, app
+        from omlx.server import app
 
-        state = ServerState()
-        state.engine_pool = _make_pool([stt_entry])
-        with patch("omlx.server._server_state", state):
+        mock_pool = _make_pool([stt_entry])
+        with patch("omlx.server._server_state") as mock_state:
+            mock_state.engine_pool = mock_pool
+            mock_state.global_settings = None
+            mock_state.distributed_inference_enabled = False
+            mock_state.process_memory_enforcer = None
+            mock_state.hf_downloader = None
+            mock_state.ms_downloader = None
+            mock_state.mcp_manager = None
+            mock_state.api_key = None
+            mock_state.settings_manager = MagicMock()
+            mock_state.settings_manager.get_settings.return_value = MagicMock(
+                model_alias=None, is_hidden=False
+            )
             with TestClient(app, raise_server_exceptions=False) as client:
-                yield client, state.engine_pool
+                yield client, mock_pool
 
     @pytest.fixture
     def client_with_mixed(self, stt_entry, tts_entry, llm_entry):
         """TestClient with a pool containing STT + TTS + LLM models."""
-        from omlx.server import ServerState, app
+        from omlx.server import app
 
-        state = ServerState()
-        state.engine_pool = _make_pool([stt_entry, tts_entry, llm_entry])
-        with patch("omlx.server._server_state", state):
+        mock_pool = _make_pool([stt_entry, tts_entry, llm_entry])
+        with patch("omlx.server._server_state") as mock_state:
+            mock_state.engine_pool = mock_pool
+            mock_state.global_settings = None
+            mock_state.distributed_inference_enabled = False
+            mock_state.process_memory_enforcer = None
+            mock_state.hf_downloader = None
+            mock_state.ms_downloader = None
+            mock_state.mcp_manager = None
+            mock_state.api_key = None
+            mock_state.settings_manager = MagicMock()
+            mock_state.settings_manager.get_settings.return_value = MagicMock(
+                model_alias=None, is_hidden=False
+            )
             with TestClient(app, raise_server_exceptions=False) as client:
-                yield client, state.engine_pool
+                yield client, mock_pool
 
     def test_models_list_returns_200(self, client_with_stt):
         client, _ = client_with_stt
