@@ -131,8 +131,8 @@ class HermesIntegration(Integration):
         config["model"] = model_config
 
         # Hermes' only reasoning knob is agent.reasoning_effort ("none".."xhigh",
-        # default "medium"). Write it only on an explicit signal so the
-        # default stands otherwise.
+        # default "medium"). Write it only on an explicit signal so the default
+        # stands otherwise.
         agent_config = config.get("agent", {})
         if not isinstance(agent_config, dict):
             agent_config = {}
